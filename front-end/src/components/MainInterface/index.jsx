@@ -1,21 +1,19 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Typography, Input, Button, message, Progress, Card } from 'antd';
-import { YoutubeOutlined, DownloadOutlined, CheckCircleFilled, SyncOutlined } from '@ant-design/icons';
+import { message } from 'antd';
+import { YoutubeOutlined, CustomerServiceOutlined, LoadingOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import { myServer, myRoot } from '../../utils';
-import Icon from '../Icon';
 import './index.css';
 
-const { Title, Text } = Typography;
 const YT_UPLOAD_TIMEOUT_MS = 50 * 60 * 1000;
 
 const statusText = [
-    'Preparing...',
-    'Extracting melody & analyzing meta...',
+    'Preparing audio...',
+    'Extracting melody & analyzing...',
     'Constructing chord progressions...',
     'Refining progressions...',
     'Generating textures...',
-    'Synthesizing...',
+    'Synthesizing MIDI...',
     'Complete!'
 ];
 
@@ -106,9 +104,7 @@ export default function MainInterface() {
                     fetchResults();
                 }
             })
-            .catch(() => {
-                // Ignore transient errors
-            });
+            .catch(() => {});
     };
 
     const fetchResults = () => {
@@ -131,69 +127,68 @@ export default function MainInterface() {
 
     return (
         <div className="app-container">
-            <div className="main-card">
-                <Title level={1} className="title-gradient">Piano Accompaniment Generator</Title>
-                <div className="subtitle">Turn any YouTube song into a piano accompaniment MIDI automatically.</div>
-                
-                <Input.Search
-                    className="yt-input"
-                    size="large"
-                    placeholder="Paste YouTube URL here..."
-                    enterButton="Generate"
-                    value={url}
-                    onChange={e => setUrl(e.target.value)}
-                    onSearch={onGenerate}
-                    loading={status === 'processing'}
-                    disabled={status === 'processing'}
-                    prefix={<YoutubeOutlined style={{ color: '#ff0000', fontSize: '20px', marginRight: '8px' }} />}
-                />
+            <div className="main-content">
+                <h1 className="hero-title">Piano Accompaniment</h1>
+                <p className="hero-subtitle">
+                    Transform any YouTube song into a beautiful piano accompaniment MIDI.<br/>
+                    Powered by AI, completely automatic.
+                </p>
+
+                <div className="input-wrapper">
+                    <YoutubeOutlined style={{ fontSize: '24px', color: '#ff0000', marginRight: '12px' }} />
+                    <input 
+                        className="custom-input"
+                        placeholder="Paste a YouTube link here..."
+                        value={url}
+                        onChange={e => setUrl(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && status !== 'processing' && onGenerate()}
+                        disabled={status === 'processing'}
+                    />
+                    <button 
+                        className="generate-btn" 
+                        onClick={onGenerate}
+                        disabled={status === 'processing' || !url.trim()}
+                    >
+                        {status === 'processing' ? 'Generating...' : 'Generate'}
+                    </button>
+                </div>
 
                 {status === 'processing' && (
-                    <div className="status-container">
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
-                            <Text strong>{statusText[Math.min(stage, 6)]}</Text>
-                            <Text type="secondary">{Math.round((stage / 6) * 100)}%</Text>
+                    <div className="status-area">
+                        <LoadingOutlined style={{ fontSize: '36px', color: '#111' }} spin />
+                        <div className="status-text">{statusText[Math.min(stage, 6)]}</div>
+                        <div className="status-subtext">
+                            {stage === 0 ? "Downloading and isolating vocals. This takes a few minutes..." : "Composing accompaniment..."}
                         </div>
-                        <Progress percent={Math.round((stage / 6) * 100)} status="active" strokeColor={{ '0%': '#108ee9', '100%': '#87d068' }} />
-                        <Text type="secondary" style={{ display: 'block', marginTop: '15px', fontSize: '13px' }}>
-                            {stage === 0 ? "Downloading and isolating vocals (this may take a few minutes)..." : "AI is composing your accompaniment..."}
-                        </Text>
                     </div>
                 )}
 
                 {status === 'error' && (
-                    <div className="status-container" style={{ background: '#fff1f0', border: '1px solid #ffa39e' }}>
-                        <Title level={4} style={{ color: '#cf1322', marginTop: 0 }}>Generation Failed</Title>
-                        <Text style={{ color: '#cf1322' }}>{errorMsg}</Text>
-                        <div style={{ marginTop: '15px' }}>
-                            <Button onClick={() => setStatus('idle')} type="primary" danger>Try Again</Button>
-                        </div>
+                    <div className="error-box">
+                        <div style={{ fontWeight: 600, marginBottom: '8px', fontSize: '1.1rem' }}>Generation Failed</div>
+                        <div>{errorMsg}</div>
+                        <button className="reset-btn" onClick={() => setStatus('idle')} style={{ marginTop: '20px' }}>Try Again</button>
                     </div>
                 )}
 
                 {status === 'done' && (
-                    <div className="result-container">
-                        <a href={`${myRoot}/midi/${chordName}`} download="chord.mid" style={{ flex: 1, textDecoration: 'none' }}>
-                            <Card className="download-card" bodyStyle={{ padding: '30px 20px' }}>
-                                <DownloadOutlined style={{ fontSize: '32px', color: '#1890ff', marginBottom: '15px' }} />
-                                <Title level={4} style={{ margin: '0 0 10px 0' }}>Download Chords</Title>
-                                <Text type="secondary">Melody + Block Chords</Text>
-                            </Card>
-                        </a>
-                        <a href={`${myRoot}/midi/${accName}`} download="accompaniment.mid" style={{ flex: 1, textDecoration: 'none' }}>
-                            <Card className="download-card" bodyStyle={{ padding: '30px 20px' }}>
-                                <DownloadOutlined style={{ fontSize: '32px', color: '#722ed1', marginBottom: '15px' }} />
-                                <Title level={4} style={{ margin: '0 0 10px 0' }}>Download Accompaniment</Title>
-                                <Text type="secondary">Melody + Textured Piano</Text>
-                            </Card>
-                        </a>
+                    <div className="status-area">
+                        <div className="results-grid">
+                            <a href={`${myRoot}/midi/${chordName}`} download="chord.mid" className="result-card">
+                                <CustomerServiceOutlined className="result-icon" />
+                                <div className="result-title">Chords</div>
+                                <div className="result-desc">Melody + Block Chords</div>
+                            </a>
+                            <a href={`${myRoot}/midi/${accName}`} download="accompaniment.mid" className="result-card">
+                                <CustomerServiceOutlined className="result-icon" />
+                                <div className="result-title">Accompaniment</div>
+                                <div className="result-desc">Melody + Textured Piano</div>
+                            </a>
+                        </div>
+                        <button className="reset-btn" onClick={() => { setStatus('idle'); setUrl(''); }}>
+                            Generate Another Song
+                        </button>
                     </div>
-                )}
-                
-                {status === 'done' && (
-                    <Button type="link" onClick={() => { setStatus('idle'); setUrl(''); }} style={{ marginTop: '30px' }}>
-                        Generate Another Song
-                    </Button>
                 )}
             </div>
         </div>
