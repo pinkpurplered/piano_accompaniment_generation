@@ -13,8 +13,9 @@ __pycache__/
 # Back-end runtime (generate_save session dirs next to app.py)
 back-end/*-*-*-*-*/
 /*-*-*-*-*/
-back-end/static/midi/
-static/midi/
+back-end/static/
+front-end/build/
+static/
 complex_chord_test.py
 a.txt
 lookup.xlsx
