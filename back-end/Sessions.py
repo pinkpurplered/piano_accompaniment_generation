@@ -5,7 +5,8 @@ import time
 import uuid
 
 EXPIRE = 3600
-from construct_midi_seg import MIDI_FOLDER
+import os
+MIDI_FOLDER = os.path.join(os.path.dirname(__file__), 'static', 'midi')
 
 class Session:
 
