@@ -7,8 +7,8 @@ import React from 'react';
 const help1 = (
   <div style={{paddingLeft:'5%', paddingRight:'5%'}}>
     <Typography.Title level={4}>What are required before generation?</Typography.Title>
-    <Typography.Title level={5}>Melody</Typography.Title>
-    <Typography.Paragraph>AccoMonatage2 needs a leading melody to generate accompaniment. Please drag the melody to the box or click to upload your melody piece. Melody must be a single-track MIDI file (or multi-track with the melody piece at the first track).</Typography.Paragraph>
+    <Typography.Title level={5}>Song source</Typography.Title>
+    <Typography.Paragraph>Provide a YouTube or YouTube Music URL for the full song, then use Load melody. The server downloads audio and estimates a lead line (Basic Pitch) before you set phrases and generate. Long songs can take several minutes; FFmpeg and yt-dlp must be available on the server.</Typography.Paragraph>
     <Typography.Title level={5}>Phrases (segmentation)</Typography.Title>
     <Typography.Paragraph>You must also specify the phrases of the uploaded melody. Each phrase has a name and a length. Phrases with the same name are considered as similar phrases when generating textures. Currently, the length of the phrases only supports 4-bar and 8-bar. Please make sure your melody can fit in the phrase structures.</Typography.Paragraph>
     <Typography.Title level={5}>{'Tonic & mode & meter'}</Typography.Title>

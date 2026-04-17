@@ -6,7 +6,7 @@ from ...utils.structured import major_map, minor_map, str_to_root
 
 
 class PreProcessor:
-    accepted_phrase_length = [4, 8, 16, 12, 24, 32]
+    accepted_phrase_length = [4, 8]
 
     def __init__(self, midi_path='', phrase=None, meta=None, note_shift=0, **kwargs):
         self.midi_path = None
@@ -32,7 +32,7 @@ class PreProcessor:
             self.meta['pos'] = ['x' for i in splited_melo]
             if 'tempo' not in self.meta.keys():
                 self.meta['tempo'] = self.midi.get_tempo_changes()[1][0]
-                self.meta['unit'] = 60 / self.meta['tempo'] / 4
+            self.meta['unit'] = 60 / self.meta['tempo'] / 4
             print(self.meta)
 
         for i in splited_melo:

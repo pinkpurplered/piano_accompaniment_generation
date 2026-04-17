@@ -20,7 +20,7 @@ class Core:
         'main': ['DP'],
         'post': ['PostProcessor'],
         'texture': ['AccoMontage'],
-        'phrase': [4, 8, 12, 16, 24, 32],
+        'phrase': [4, 8],
         'chord_style': ['classy', 'emotional', 'standard', 'second-inversion', 'root-note', 'cluster', 'power-chord',
                         'sus2', 'seventh', 'power-octave', 'unknown', 'sus4', 'first-inversion', 'full-octave'],
         'progression_style': ['emotional', 'pop', 'dark', 'r&b', 'edm', 'unknown'],

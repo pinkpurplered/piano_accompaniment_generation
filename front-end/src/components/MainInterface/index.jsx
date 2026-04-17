@@ -11,7 +11,7 @@ const { Title } = Typography;
 
 const stepText = {
 
-    0:{ title:'Set Parameters', des:'Upload melodies.'},
+    0:{ title:'Set Parameters', des:'Load a full song from YouTube.'},
     1:{ title:'Generate Accompaniment', des:'Choose the best.'} 
 
 }

@@ -21,7 +21,7 @@ def handle_exception(code):
                       'list) or chorderator.set_segmentation(str)'
             elif code == 312:
                 msg = 'Phrase length not accepted. Up to the current version, only the following length is supported: ' \
-                      '4, 8, 12, 16, 24, 32.'
+                      '4, 8.'
             else:
                 msg = ''
         elif int(str(code)[1]) == 2:

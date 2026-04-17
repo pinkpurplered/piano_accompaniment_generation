@@ -94,6 +94,8 @@ python back-end/app.py
 
 You can interact with the GUI at http://127.0.0.1:8765 (default; avoids macOS AirPlay on port 5000). Override with `PORT=...` when starting `back-end/app.py`.
 
+The web UI loads a **YouTube / YouTube Music** URL on the server: install **yt-dlp**, **FFmpeg** + **ffprobe** on the server `PATH` (e.g. `brew install ffmpeg`), or set **`FFMPEG_LOCATION`** to the directory that contains both binaries. Recent **yt-dlp** also benefits from **Node** or **Deno** on `PATH` for full YouTube support (`brew install node`). Python deps: **basic-pitch** / **librosa** (see `back-end/requirements.txt`).
+
 ### Reference and Acknowledgement
 
 Thanks to Prof. Gus Xia for his guidance. Thanks to Jingwei Zhao and the AccoMontage system that provides solid foundations for this research. His repository can be found at [AccoMontage](https://github.com/zhaojw1998/AccoMontage). Thanks to all members at [New York University Shanghai Music-X-Lab](http://musicxlab.com) for their generous support.

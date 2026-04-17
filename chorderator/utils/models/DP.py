@@ -99,8 +99,8 @@ class DP:
                 bar_units = grid // 2
                 raise ValueError(
                     'No chord progression template matches phrase {} (melody grid length {}, '
-                    '{} half-bar units vs template length). The DP library only covers certain '
-                    'phrase lengths — use even 4- or 8-bar phrases in the segmentation UI.'
+                    '{} half-bar units vs template length). The DP library only covers 4-bar and '
+                    '8-bar phrase lengths — use only 4- or 8-bar phrases in the segmentation UI.'
                     .format(i, grid, bar_units)
                 )
 

@@ -11,7 +11,7 @@
     "antd": "^4.16.13",
     "axios": "^0.24.0",
     "buffer": "^6.0.3",
-    "craco-less": "^2.0.0",
+    "craco-less": "1.20.0",
     "mockjs": "^1.1.0",
     "pubsub-js": "^1.9.3",
     "react": "^17.0.2",
@@ -45,9 +45,7 @@
       "last 1 safari version"
     ]
   },
-  "proxy": "http://127.0.0.1:8765",
-  "devDependencies": {
-    "webpack": "^4.44.2",
-    "webpack-cli": "^4.9.2"
+  "overrides": {
+    "webpack": "4.44.2"
   }
 }
