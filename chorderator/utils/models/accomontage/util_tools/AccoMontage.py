@@ -223,6 +223,22 @@ def render_acc(pianoRoll, chord_table, query_seg, indices, shifts, acc_pool, sta
     acc_emsemble = melodySplit(acc_emsemble, WINDOWSIZE=32, HOPSIZE=32, VECTORSIZE=128)
     chord_table = chordSplit(chord_table, 8, 8)
     pianoRoll = melodySplit(pianoRoll, WINDOWSIZE=32, HOPSIZE=32, VECTORSIZE=142)
+
+    # Keep rhythm/chord windows aligned for VAE inference. When custom chord generation
+    # produces slightly longer/shorter chord tables, truncate to the shared prefix.
+    n_windows = min(acc_emsemble.shape[0], chord_table.shape[0], pianoRoll.shape[0])
+    if n_windows <= 0:
+        raise ValueError('AccoMontage received empty query windows after split.')
+    if acc_emsemble.shape[0] != chord_table.shape[0] or acc_emsemble.shape[0] != pianoRoll.shape[0]:
+        print('AccoMontage window mismatch:',
+              'acc=', acc_emsemble.shape[0],
+              'chord=', chord_table.shape[0],
+              'piano=', pianoRoll.shape[0],
+              '-> truncating to', n_windows)
+        acc_emsemble = acc_emsemble[:n_windows]
+        chord_table = chord_table[:n_windows]
+        pianoRoll = pianoRoll[:n_windows]
+
     if torch.cuda.is_available():
         model = DisentangleVAE.init_model(torch.device('cuda')).cuda()
         checkpoint = torch.load(DATA_DIR + '/model_master_final.pt') \

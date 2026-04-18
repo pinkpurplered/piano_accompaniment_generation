@@ -2,10 +2,11 @@ import React, { useState, useEffect, useRef } from 'react';
 import { message } from 'antd';
 import { YoutubeOutlined, CustomerServiceOutlined, LoadingOutlined } from '@ant-design/icons';
 import axios from 'axios';
-import { myServer, myRoot } from '../../utils';
+import { myServer } from '../../utils';
 import './index.css';
 
 const YT_UPLOAD_TIMEOUT_MS = 50 * 60 * 1000;
+const GENERATED_QUERY_TIMEOUT_MS = 25 * 60 * 1000;
 
 const statusText = [
     'Preparing audio...',
@@ -14,7 +15,8 @@ const statusText = [
     'Refining progressions...',
     'Generating textures...',
     'Synthesizing MIDI...',
-    'Complete!'
+    'Finalizing MIDI...',
+    'Mixing MP3 audio (this may take a few minutes)...'
 ];
 
 export default function MainInterface() {
@@ -24,6 +26,8 @@ export default function MainInterface() {
     const [errorMsg, setErrorMsg] = useState(null);
     const [chordName, setChordName] = useState(null);
     const [accName, setAccName] = useState(null);
+    const [vocalChordMp3, setVocalChordMp3] = useState(null);
+    const [vocalTexturedMp3, setVocalTexturedMp3] = useState(null);
     const intervalRef = useRef(null);
 
     useEffect(() => {
@@ -42,6 +46,10 @@ export default function MainInterface() {
         setStatus('processing');
         setStage(0);
         setErrorMsg(null);
+        setChordName(null);
+        setAccName(null);
+        setVocalChordMp3(null);
+        setVocalTexturedMp3(null);
 
         axios.post(`${myServer}/upload_youtube`, { url: u, use_vocal_only: true }, {
             withCredentials: true,
@@ -108,29 +116,44 @@ export default function MainInterface() {
     };
 
     const fetchResults = () => {
-        axios.get(`${myServer}/generated_query`, { withCredentials: true })
+        setStage(7);
+        axios.get(`${myServer}/generated_query`, {
+            withCredentials: true,
+            timeout: GENERATED_QUERY_TIMEOUT_MS,
+        })
             .then(res => {
                 if (res.data.status === 'ok') {
                     setChordName(res.data.chord_midi_name);
                     setAccName(res.data.acc_midi_name);
+                    setVocalChordMp3(res.data.vocal_chord_mp3);
+                    setVocalTexturedMp3(res.data.vocal_textured_mp3);
                     setStatus('done');
                 } else {
                     setStatus('error');
-                    setErrorMsg('Failed to fetch generated files');
+                    setErrorMsg(res.data?.status || 'Failed to fetch generated files');
                 }
             })
-            .catch(() => {
+            .catch((e) => {
                 setStatus('error');
-                setErrorMsg('Failed to fetch generated files');
+                const backendMsg = e?.response?.data?.status;
+                if (backendMsg) {
+                    setErrorMsg(backendMsg);
+                    return;
+                }
+                if (e?.code === 'ECONNABORTED') {
+                    setErrorMsg('Result assembly timed out while mixing audio. Please try a shorter song or try again.');
+                    return;
+                }
+                setErrorMsg(e?.message || 'Failed to fetch generated files');
             });
     };
 
     return (
         <div className="app-container">
             <div className="main-content">
-                <h1 className="hero-title">Piano Accompaniment</h1>
+                <h1 className="hero-title">Piano Accompaniment Generator</h1>
                 <p className="hero-subtitle">
-                    Transform any YouTube song into a beautiful piano accompaniment MIDI.<br/>
+                    Transform any YouTube song into a piano accompaniment MIDI.<br/>
                     Powered by AI, completely automatic.
                 </p>
 
@@ -156,9 +179,9 @@ export default function MainInterface() {
                 {status === 'processing' && (
                     <div className="status-area">
                         <LoadingOutlined style={{ fontSize: '36px', color: '#111' }} spin />
-                        <div className="status-text">{statusText[Math.min(stage, 6)]}</div>
+                        <div className="status-text">{statusText[Math.min(stage, 7)]}</div>
                         <div className="status-subtext">
-                            {stage === 0 ? "Downloading and isolating vocals. This takes a few minutes..." : "Composing accompaniment..."}
+                            {stage === 0 ? "Isolating vocals. This takes a few minutes..." : "Composing accompaniment..."}
                         </div>
                     </div>
                 )}
@@ -173,19 +196,55 @@ export default function MainInterface() {
 
                 {status === 'done' && (
                     <div className="status-area">
+                        <h2 style={{ marginBottom: '24px', fontSize: '1.5rem', fontWeight: 600 }}>Your Accompaniments</h2>
+                        
                         <div className="results-grid">
-                            <a href={`${myRoot}/midi/${chordName}`} download="chord.mid" className="result-card">
-                                <CustomerServiceOutlined className="result-icon" />
-                                <div className="result-title">Chords</div>
-                                <div className="result-desc">Melody + Block Chords</div>
-                            </a>
-                            <a href={`${myRoot}/midi/${accName}`} download="accompaniment.mid" className="result-card">
-                                <CustomerServiceOutlined className="result-icon" />
-                                <div className="result-title">Accompaniment</div>
-                                <div className="result-desc">Melody + Textured Piano</div>
-                            </a>
+                            {/* MP3 with audio player: Vocals + Block Chords */}
+                            {vocalChordMp3 && (
+                                <div className="result-card audio-card">
+                                    <CustomerServiceOutlined className="result-icon" />
+                                    <div className="result-title">Vocals + Block Chords</div>
+                                    <div className="result-desc">Isolated vocals + generated grand piano</div>
+                                    <audio controls className="audio-player" preload="metadata">
+                                        <source src={`${myServer}/mp3/${vocalChordMp3}`} type="audio/mpeg" />
+                                        Your browser does not support the audio element.
+                                    </audio>
+                                </div>
+                            )}
+                            
+                            {/* MP3 with audio player: Vocals + Textured Piano */}
+                            {vocalTexturedMp3 && (
+                                <div className="result-card audio-card">
+                                    <CustomerServiceOutlined className="result-icon" />
+                                    <div className="result-title">Vocals + Textured Piano</div>
+                                    <div className="result-desc">Isolated vocals + generated grand piano texture</div>
+                                    <audio controls className="audio-player" preload="metadata">
+                                        <source src={`${myServer}/mp3/${vocalTexturedMp3}`} type="audio/mpeg" />
+                                        Your browser does not support the audio element.
+                                    </audio>
+                                </div>
+                            )}
+                            
+                            {/* MIDI download: Chord Accompaniment Only */}
+                            {chordName && (
+                                <a href={`${myServer}/midi/${chordName}`} download="chord_accompaniment.mid" className="result-card">
+                                    <CustomerServiceOutlined className="result-icon" />
+                                    <div className="result-title">Block Chords MIDI</div>
+                                    <div className="result-desc">Accompaniment only (no vocals)</div>
+                                </a>
+                            )}
+                            
+                            {/* MIDI download: Textured Chord Accompaniment Only */}
+                            {accName && (
+                                <a href={`${myServer}/midi/${accName}`} download="textured_accompaniment.mid" className="result-card">
+                                    <CustomerServiceOutlined className="result-icon" />
+                                    <div className="result-title">Textured Piano MIDI</div>
+                                    <div className="result-desc">Accompaniment only (no vocals)</div>
+                                </a>
+                            )}
                         </div>
-                        <button className="reset-btn" onClick={() => { setStatus('idle'); setUrl(''); }}>
+                        
+                        <button className="reset-btn" onClick={() => { setStatus('idle'); setUrl(''); setVocalChordMp3(null); setVocalTexturedMp3(null); }}>
                             Generate Another Song
                         </button>
                     </div>

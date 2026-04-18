@@ -410,6 +410,10 @@ def read_progressions(progression_file='progressions.pcls', span=False):
         try:
             return RenameUnpickler(file_obj).load()
         except:
+            try:
+                file_obj.seek(0)
+            except Exception:
+                pass
             return pickle.load(file_obj)
 
     def span_progression(progression):

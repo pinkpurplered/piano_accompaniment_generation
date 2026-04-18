@@ -54,7 +54,11 @@ class PostProcessor:
         new_list = []
         for progression in self.progression_list:
             dup_id = progression.progression_class['duplicate-id']
-            new_list.append(progression_lib[dup_id])
+            if dup_id in progression_lib:
+                new_list.append(progression_lib[dup_id])
+            else:
+                # Fine-grained or custom progression — use the progression itself as its own library entry
+                new_list.append([progression])
         return new_list
 
     def __filter_style(self, progression_lib_filtered, chord_style, prog_style, output_style):
@@ -64,7 +68,10 @@ class PostProcessor:
             new_sub_list = []
             for progression in lst:
                 if self.filter_by_new_label:
-                    if type(output_style) == str:
+                    # Fine-grained progressions always pass through style filter
+                    if progression.progression_class.get('pattern') == 'fine_grained':
+                        new_sub_list.append(progression)
+                    elif type(output_style) == str:
                         if progression.progression_class['new_label'] == output_style or output_style == '*':
                             new_sub_list.append(progression)
                     elif type(output_style) == list and len(output_style) == len(progression_lib_filtered):
@@ -188,7 +195,10 @@ class PostProcessor:
         return new_chord
 
     def __search_other_styles(self, progression):
-        all_others = self.original_progression_lib[progression.progression_class['duplicate-id']]
+        dup_id = progression.progression_class['duplicate-id']
+        if dup_id not in self.original_progression_lib:
+            return []
+        all_others = self.original_progression_lib[dup_id]
         my_set = set()
         for prog in all_others:
             my_set.add(prog.progression_class['new_label'])

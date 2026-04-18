@@ -19,6 +19,7 @@ import chorderator as cdt
 from Sessions import Sessions
 import melody_analyze
 import youtube_melody
+import audio_mixer
 
 app = Flask(__name__, static_url_path='')
 app.secret_key = 'AccoMontage2-GUI'
@@ -27,7 +28,61 @@ APP_ROUTE = '/api/chorderator_back_end'
 sessions = Sessions()
 logging.basicConfig(level=logging.DEBUG)
 MIDI_FOLDER = os.path.join(os.path.dirname(__file__), 'static', 'midi')
+MP3_FOLDER = os.path.join(os.path.dirname(__file__), 'static', 'mp3')
 os.makedirs(MIDI_FOLDER, exist_ok=True)
+os.makedirs(MP3_FOLDER, exist_ok=True)
+
+# File cleanup configuration
+CLEANUP_MAX_AGE_SECONDS = 3600  # 1 hour - files older than this will be deleted
+
+
+def cleanup_old_files():
+    """Remove old generated files and session directories to save disk space."""
+    try:
+        current_time = time.time()
+        base_dir = os.path.dirname(__file__)
+        
+        # Clean up old MIDI files in static/midi
+        for filename in os.listdir(MIDI_FOLDER):
+            if filename.endswith('.mid'):
+                filepath = os.path.join(MIDI_FOLDER, filename)
+                try:
+                    if os.path.isfile(filepath):
+                        file_age = current_time - os.path.getmtime(filepath)
+                        if file_age > CLEANUP_MAX_AGE_SECONDS:
+                            os.remove(filepath)
+                            logging.info(f'Cleaned up old MIDI file: {filename}')
+                except Exception as e:
+                    logging.warning(f'Failed to clean up MIDI file {filename}: {e}')
+        
+        # Clean up old MP3 files in static/mp3
+        for filename in os.listdir(MP3_FOLDER):
+            if filename.endswith('.mp3'):
+                filepath = os.path.join(MP3_FOLDER, filename)
+                try:
+                    if os.path.isfile(filepath):
+                        file_age = current_time - os.path.getmtime(filepath)
+                        if file_age > CLEANUP_MAX_AGE_SECONDS:
+                            os.remove(filepath)
+                            logging.info(f'Cleaned up old MP3 file: {filename}')
+                except Exception as e:
+                    logging.warning(f'Failed to clean up MP3 file {filename}: {e}')
+        
+        # Clean up old session directories (UUID-format directories older than cleanup threshold)
+        for item in os.listdir(base_dir):
+            item_path = os.path.join(base_dir, item)
+            if os.path.isdir(item_path) and '-' in item and len(item) == 36:
+                try:
+                    # Check if it's a UUID-format directory
+                    dir_age = current_time - os.path.getmtime(item_path)
+                    if dir_age > CLEANUP_MAX_AGE_SECONDS:
+                        shutil.rmtree(item_path, ignore_errors=True)
+                        logging.info(f'Cleaned up old session directory: {item}')
+                except Exception as e:
+                    logging.warning(f'Failed to clean up session directory {item}: {e}')
+                    
+    except Exception as e:
+        logging.error(f'Cleanup failed: {e}')
 
 
 def session_from_request(req):
@@ -54,6 +109,26 @@ def send_file_from_session(file, name=None):
     )
 
 
+def extract_accompaniment_only(midi_obj):
+    """
+    Extract only accompaniment tracks from MIDI, removing the melody.
+    Assumes the melody is the first instrument (track 0) or the monophonic lead.
+    """
+    new_midi = pretty_midi.PrettyMIDI()
+    new_midi.time_signature_changes = midi_obj.time_signature_changes
+    new_midi.key_signature_changes = midi_obj.key_signature_changes
+    
+    # Copy only non-melody instruments (skip first track which is typically the melody)
+    if len(midi_obj.instruments) > 1:
+        for instrument in midi_obj.instruments[1:]:
+            new_midi.instruments.append(instrument)
+    else:
+        # If there's only one instrument, return empty MIDI with proper structure
+        logging.warning("MIDI has only one instrument - likely melody only")
+        
+    return new_midi
+
+
 def begin_generate_thread(core, session_id):
     try:
         core.generate_save(session_id, log=True)
@@ -74,6 +149,9 @@ def begin_generate_thread(core, session_id):
 
 @app.route(APP_ROUTE + '/upload_youtube', methods=['POST'])
 def upload_youtube():
+    # Clean up old files periodically
+    cleanup_old_files()
+    
     data = request.get_json(silent=True) or {}
     url = (data.get('url') or '').strip()
     use_vocal_only = bool(data.get('use_vocal_only', True))
@@ -89,6 +167,22 @@ def upload_youtube():
     try:
         midi_bytes, hints = youtube_melody.youtube_url_to_midi_bytes(url, work_dir, use_vocal_only=use_vocal_only)
         session.melody = midi_bytes
+        
+        # Log whether vocals were created for future MP3 generation
+        vocals_path = os.path.join(work_dir, "demucs_stems")
+        if os.path.isdir(vocals_path):
+            # Check if vocals.wav exists
+            vocals_found = False
+            for root, dirs, files in os.walk(vocals_path):
+                if "vocals.wav" in files:
+                    vocals_found = True
+                    logging.info("✓ Demucs vocals created and available for MP3 generation: %s", os.path.join(root, "vocals.wav"))
+                    break
+            if not vocals_found:
+                logging.warning("⚠️ demucs_stems directory exists but vocals.wav not found - MP3 generation will fail!")
+        else:
+            logging.warning("⚠️ No demucs_stems directory - vocals were not separated. MP3 generation will attempt separation later.")
+            
     except Exception as e:
         logging.exception('upload_youtube failed')
         return resp(msg=str(e)[:900])
@@ -126,10 +220,15 @@ def generate():
 
     session.core = cdt.get_chorderator()
     session.core.set_cache(**saved_data)
-    os.makedirs(session_id, exist_ok=True)
-    with open(f'{session_id}/melody.mid', 'wb') as f:
+    
+    # Use absolute path for session directory
+    session_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), session_id)
+    os.makedirs(session_dir, exist_ok=True)
+    
+    full_song_path = os.path.join(session_dir, 'full_song.mid')
+    with open(full_song_path, 'wb') as f:
         f.write(session.melody)
-    session.core.set_melody(f'{session_id}/melody.mid')
+    session.core.set_melody(full_song_path)
     session.core.set_output_style(session.chord_style)
     session.core.set_texture_prefilter(session.texture_style)
     session.core.set_meta(tonic=session.tonic, meter=session.meter, mode=session.mode, tempo=session.tempo)
@@ -165,15 +264,52 @@ def answer_gen():
     chord_midi_name = session_id + '_' + str(time.time()) + '_chord_gen.mid'
     acc_midi_name = session_id + '_' + str(time.time()) + '_textured_chord_gen.mid'
     
-    if os.path.exists(session_id + '/chord_gen.mid'):
-        pretty_midi.PrettyMIDI(session_id + '/chord_gen.mid').write(os.path.join(MIDI_FOLDER, chord_midi_name))
-    if os.path.exists(session_id + '/textured_chord_gen.mid'):
-        pretty_midi.PrettyMIDI(session_id + '/textured_chord_gen.mid').write(os.path.join(MIDI_FOLDER, acc_midi_name))
+    # Construct full path to session directory
+    session_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), session_id)
+    
+    # Copy MIDI files to static folder, extracting only accompaniment tracks
+    chord_gen_path = os.path.join(session_dir, 'chord_gen.mid')
+    if os.path.exists(chord_gen_path):
+        midi_obj = pretty_midi.PrettyMIDI(chord_gen_path)
+        # Remove melody track (typically the first instrument or highest-pitched monophonic track)
+        accompaniment_only = extract_accompaniment_only(midi_obj)
+        accompaniment_only.write(os.path.join(MIDI_FOLDER, chord_midi_name))
+    
+    textured_gen_path = os.path.join(session_dir, 'textured_chord_gen.mid')
+    if os.path.exists(textured_gen_path):
+        midi_obj = pretty_midi.PrettyMIDI(textured_gen_path)
+        accompaniment_only = extract_accompaniment_only(midi_obj)
+        accompaniment_only.write(os.path.join(MIDI_FOLDER, acc_midi_name))
+    
+    # Generate MP3 mixes
+    mp3_names = {}
+    try:
+        logging.info('MP3 generation: work_dir=%s', session_dir)
         
-    shutil.rmtree(session_id, ignore_errors=True)
+        mp3_names = audio_mixer.create_mixed_outputs(
+            session_id=session_id,
+            work_dir=session_dir,
+            output_mp3_dir=MP3_FOLDER,
+        )
+        logging.info('MP3 files generated: %s', mp3_names)
+    except Exception as e:
+        logging.error('MP3 generation failed: %s', e)
+        # Continue even if MP3 generation fails - at least return MIDI files
+        mp3_names = {"vocal_chord_mp3": None, "vocal_textured_mp3": None}
+    
+    # Clean up session directory
+    shutil.rmtree(session_dir, ignore_errors=True)
+    
+    # Clean up old static files and session directories
+    cleanup_old_files()
     
     return resp(session_id=session_id,
-                more=[['chord_midi_name', chord_midi_name], ['acc_midi_name', acc_midi_name]])
+                more=[
+                    ['chord_midi_name', chord_midi_name],
+                    ['acc_midi_name', acc_midi_name],
+                    ['vocal_chord_mp3', mp3_names.get('vocal_chord_mp3')],
+                    ['vocal_textured_mp3', mp3_names.get('vocal_textured_mp3')],
+                ])
 
 
 @app.route(APP_ROUTE + '/midi/<ran>', methods=['GET'])
@@ -185,6 +321,17 @@ def midi(ran):
     if not os.path.isfile(midi_path):
         return resp(msg='midi not found')
     return send_from_directory(MIDI_FOLDER, safe_name, as_attachment=True, download_name=safe_name)
+
+
+@app.route(APP_ROUTE + '/mp3/<ran>', methods=['GET'])
+def mp3(ran):
+    safe_name = os.path.basename(ran)
+    if not safe_name.endswith('.mp3'):
+        return resp(msg='invalid mp3 name')
+    mp3_path = os.path.join(MP3_FOLDER, safe_name)
+    if not os.path.isfile(mp3_path):
+        return resp(msg='mp3 not found')
+    return send_from_directory(MP3_FOLDER, safe_name, mimetype='audio/mpeg')
 
 
 @app.errorhandler(404)
@@ -241,4 +388,9 @@ if __name__ == '__main__':
         )
     if os.environ.get('SKIP_FREE_PORT', '').lower() not in ('1', 'true', 'yes'):
         _kill_python_listeners_on_port(port)
+    
+    # Clean up old files on startup
+    logging.info('Cleaning up old generated files on startup...')
+    cleanup_old_files()
+    
     app.run(host=host, port=port)

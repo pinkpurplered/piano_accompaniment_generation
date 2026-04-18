@@ -11,3 +11,4 @@ yt-dlp
 basic-pitch
 librosa
 demucs
+soundfile

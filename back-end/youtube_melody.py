@@ -87,6 +87,31 @@ def _run(cmd: list[str], cwd: str | None = None, timeout: int = 600) -> None:
         raise RuntimeError(err or f"command failed: {' '.join(cmd[:6])} ...")
 
 
+def _ytdlp_base_cmd() -> list[str]:
+    """
+    Return a yt-dlp command that works even when shell PATH is not fully initialized.
+    Prefer current interpreter module execution, then fallback to yt-dlp executable.
+    """
+    try:
+        import yt_dlp  # noqa: F401
+        return [sys.executable, "-m", "yt_dlp"]
+    except Exception:
+        pass
+
+    exe = shutil.which("yt-dlp")
+    if exe:
+        return [exe]
+    for cand in (
+        "/opt/anaconda3/envs/accomontage2/bin/yt-dlp",
+        "/opt/anaconda3/bin/yt-dlp",
+        "/usr/local/bin/yt-dlp",
+        "/opt/homebrew/bin/yt-dlp",
+    ):
+        if os.path.isfile(cand):
+            return [cand]
+    raise RuntimeError("yt-dlp is not installed in the active runtime. Install with: pip install yt-dlp")
+
+
 # Krumhansl–Kessler weights (C = index 0), for key estimation from instrumental stem
 _KK_MAJOR = np.array(
     [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88], dtype=np.float64
@@ -213,6 +238,13 @@ def _trim_wav_for_basic_pitch(src: str, work_dir: str, max_seconds: int) -> str:
 def _run_demucs_vocals_stem(wav_path: str, out_root: str, timeout: int = 1800) -> tuple[str, str]:
     """Run Demucs htdemucs two-stem (vocals / no_vocals). Returns paths to each wav."""
     os.makedirs(out_root, exist_ok=True)
+    # Demucs CLI expects an integer segment value in this environment.
+    # Keep it safely below the transformer ceiling (~7.8).
+    segment_raw = os.environ.get("ACCOMONTAGE_DEMUCS_SEGMENT", "7").strip() or "7"
+    try:
+        demucs_segment = str(max(1, min(7, int(float(segment_raw)))))
+    except ValueError:
+        demucs_segment = "7"
     cmd = [
         sys.executable,
         "-m",
@@ -221,6 +253,8 @@ def _run_demucs_vocals_stem(wav_path: str, out_root: str, timeout: int = 1800) -
         "vocals",
         "-n",
         "htdemucs",
+        "--segment",
+        demucs_segment,
         "-o",
         out_root,
         wav_path,
@@ -250,7 +284,7 @@ def youtube_url_to_midi_bytes(url: str, work_dir: str, use_vocal_only: bool = Tr
             "or set FFMPEG_LOCATION to the directory containing ffmpeg and ffprobe."
         )
 
-    ytdlp_cmd = ["yt-dlp", "--no-playlist", "--ffmpeg-location", ff_dir]
+    ytdlp_cmd = _ytdlp_base_cmd() + ["--no-playlist", "--ffmpeg-location", ff_dir]
     ytdlp_cmd.extend(_js_runtime_args())
     ytdlp_cmd.extend(
         [
@@ -269,12 +303,7 @@ def youtube_url_to_midi_bytes(url: str, work_dir: str, use_vocal_only: bool = Tr
         ]
     )
 
-    try:
-        _run(ytdlp_cmd, timeout=600)
-    except FileNotFoundError as e:
-        raise RuntimeError(
-            "yt-dlp is not installed. Install with: pip install yt-dlp"
-        ) from e
+    _run(ytdlp_cmd, timeout=600)
 
     wav_path = os.path.join(work_dir, "yt_audio.wav")
     if not os.path.isfile(wav_path):
