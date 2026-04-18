@@ -1,6 +1,7 @@
 torch
 tensorboard
 numpy
+Cython>=0.29.21
 pandas
 tqdm
 matplotlib

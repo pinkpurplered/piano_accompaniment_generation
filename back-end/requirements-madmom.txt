@@ -1,0 +1,4 @@
+# madmom's setup imports Cython before isolated metadata runs, so install Cython first
+# (see main requirements.txt), then:
+#   pip install --no-build-isolation -r requirements-madmom.txt
+madmom>=0.16.1

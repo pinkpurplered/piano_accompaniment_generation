@@ -1,7 +1,10 @@
 """Download audio from YouTube, split vocals vs accompaniment, transcribe vocals with Basic Pitch.
 
 Accompaniment (no_vocals) is used for coarse key estimation to suggest tonic/mode in the API,
-and optionally librosa beat tracking (see ACCOMONTAGE_NO_BEAT_TRACK) to nudge tempo / phrase cuts.
+and optional beat tracking for tempo / phrase cuts / chord downbeat alignment:
+``madmom`` DBN downbeat tracking when installed (``pip install Cython`` then
+``pip install --no-build-isolation -r requirements-madmom.txt`` from ``back-end/``), otherwise librosa
+beats plus onset-strength downbeat phase (librosa alone has no measure position).
 Chord progression and texture are still produced by Chorderator from the melody MIDI; the
 cleaner vocal stem reduces bleed from backing instruments into the estimated lead line.
 """
@@ -15,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from urllib.parse import urlparse
 
 import numpy as np
@@ -122,6 +126,109 @@ _KK_MINOR = np.array(
 _TONIC_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 
+def _beat_track_madmom(wav_path: str, max_seconds: float = 240.0) -> dict | None:
+    """Return beat grid with true downbeat labels when madmom is installed."""
+    if os.environ.get("ACCOMONTAGE_NO_MADMOM", "").lower() in ("1", "true", "yes"):
+        return None
+    try:
+        from madmom.features.downbeats import DBNDownBeatTrackingProcessor
+    except ImportError:
+        return None
+    try:
+        import soundfile as sf
+    except ImportError:
+        return None
+
+    tmp_path: str | None = None
+    out: np.ndarray | None = None
+    try:
+        sig, sr = sf.read(wav_path, always_2d=False)
+        if sig.ndim > 1:
+            sig = np.mean(sig.astype(np.float64), axis=1)
+        else:
+            sig = sig.astype(np.float64)
+        nmax = int(float(max_seconds) * float(sr))
+        if sig.shape[0] > nmax:
+            sig = sig[:nmax]
+        if sig.size < int(sr) * 2:
+            return None
+        fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        sf.write(tmp_path, sig, int(sr))
+        proc = DBNDownBeatTrackingProcessor(beats_per_bar=[4])
+        out = np.asarray(proc(tmp_path), dtype=np.float64)
+    except Exception as e:
+        logging.warning("madmom downbeat tracking failed: %s", e)
+        return None
+    finally:
+        if tmp_path and os.path.isfile(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    if out is None or out.size == 0 or (out.ndim == 2 and out.shape[1] < 2):
+        return None
+    if out.ndim == 1:
+        return None
+    times = out[:, 0].astype(np.float64).ravel()
+    nums = np.rint(out[:, 1]).astype(np.int64).ravel()
+    if times.size < 8:
+        return None
+    spq = float(np.median(np.diff(times)))
+    if spq <= 0:
+        return None
+    bpm = 60.0 / spq
+    if not (56.0 < bpm < 200.0):
+        return None
+    if times.size > 2000:
+        times = times[:2000]
+        nums = nums[:2000]
+    return {
+        "beat_bpm": float(bpm),
+        "beat_times_sec": times.tolist(),
+        "beat_numbers": [int(x) for x in nums.tolist()],
+        "beat_tracker": "madmom",
+    }
+
+
+def _downbeat_phase_from_onsets(bt: np.ndarray, y: np.ndarray, sr: int) -> int | None:
+    """
+    Librosa emits quarter-note pulses with arbitrary phase vs bar line. Pick phase q in 0..3
+    so bt[q::4] aligns with stronger onset energy (typical of kick / downbeats in pop).
+    """
+    try:
+        import librosa
+    except ImportError:
+        return None
+    hop = 512
+    try:
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
+    except Exception:
+        return None
+    if onset_env.size < 2:
+        return None
+    try:
+        beat_frames = librosa.time_to_frames(bt.astype(np.float64), sr=sr, hop_length=hop)
+    except Exception:
+        return None
+    beat_frames = np.clip(beat_frames, 0, onset_env.size - 1)
+    scores: list[float] = []
+    best_q, best_s = 0, -1.0
+    for q in range(4):
+        idxs = beat_frames[q::4][:40]
+        s = float(np.sum(onset_env[idxs])) if idxs.size else 0.0
+        scores.append(s)
+        if s > best_s:
+            best_s, best_q = s, q
+    top = float(np.max(scores))
+    if top <= 1e-9:
+        return None
+    if (float(np.max(scores)) - float(np.min(scores))) < 0.06 * top:
+        return None
+    return int(best_q)
+
+
 def _beat_track_no_vocals(wav_path: str, max_seconds: float = 240.0) -> dict | None:
     """
     Beat-track the instrumental stem for tempo / phrase nudging in melody_analyze.
@@ -129,6 +236,11 @@ def _beat_track_no_vocals(wav_path: str, max_seconds: float = 240.0) -> dict | N
     """
     if os.environ.get("ACCOMONTAGE_NO_BEAT_TRACK", "").lower() in ("1", "true", "yes"):
         return None
+    mm = _beat_track_madmom(wav_path, max_seconds=max_seconds)
+    if mm is not None:
+        logging.info("beat_track: using madmom (downbeat-labeled grid)")
+        return mm
+
     try:
         import librosa
     except ImportError:
@@ -155,7 +267,12 @@ def _beat_track_no_vocals(wav_path: str, max_seconds: float = 240.0) -> dict | N
         return None
     if bt.size > 2000:
         bt = bt[:2000]
-    return {"beat_bpm": bpm, "beat_times_sec": bt.tolist()}
+    out: dict = {"beat_bpm": bpm, "beat_times_sec": bt.tolist(), "beat_tracker": "librosa"}
+    phase = _downbeat_phase_from_onsets(bt, y, sr)
+    if phase is not None:
+        out["beat_downbeat_phase"] = phase
+        logging.info("beat_track: librosa + onset downbeat phase=%s", phase)
+    return out
 
 
 def _estimate_key_from_wav(wav_path: str, max_seconds: float = 120.0) -> tuple[str | None, str | None]:
@@ -403,8 +520,17 @@ def youtube_url_to_midi_bytes(url: str, work_dir: str, use_vocal_only: bool = Tr
         shift_amount = 0.0
         if hints.get("beat_times_sec") and len(hints["beat_times_sec"]) > 1:
             from scipy.interpolate import interp1d
-            
-            beats = sorted(hints["beat_times_sec"])
+
+            raw_bt = [float(x) for x in hints["beat_times_sec"]]
+            nums_hint = hints.get("beat_numbers")
+            if isinstance(nums_hint, (list, tuple)) and len(nums_hint) == len(raw_bt):
+                paired = sorted(zip(raw_bt, nums_hint), key=lambda z: z[0])
+                beats = [float(a) for a, _ in paired]
+                nums_aligned = [b for _, b in paired]
+            else:
+                beats = sorted(raw_bt)
+                nums_aligned = None
+
             beat_duration = 60.0 / midi_tempo
             
             valid_beats = [i for i, b in enumerate(beats) if b <= first_start + 0.1]
@@ -423,8 +549,20 @@ def youtube_url_to_midi_bytes(url: str, work_dir: str, use_vocal_only: bool = Tr
                     n.start = max(0.0, n.start)
                     new_notes.append(n)
             midi.instruments[0].notes = new_notes
-            
-            hints["beat_times_sec"] = [t for t in target_times if t >= -0.1]
+
+            if nums_aligned is not None and len(nums_aligned) == len(beats):
+                synced = [(t, nums_aligned[i]) for i, t in enumerate(target_times) if t >= -0.1]
+                hints["beat_times_sec"] = [a for a, _ in synced]
+                hints["beat_numbers"] = [b for _, b in synced]
+            else:
+                k0 = next((i for i, t in enumerate(target_times) if t >= -0.1), 0)
+                hints["beat_times_sec"] = [t for t in target_times if t >= -0.1]
+                if hints.get("beat_downbeat_phase") is not None:
+                    try:
+                        ph = int(hints["beat_downbeat_phase"]) % 4
+                        hints["beat_downbeat_phase"] = (ph - k0) % 4
+                    except (TypeError, ValueError):
+                        pass
         else:
             shift_amount = first_start
             if shift_amount > 0.5:
