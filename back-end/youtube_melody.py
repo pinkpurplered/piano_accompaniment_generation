@@ -5,7 +5,7 @@ and optional beat tracking for tempo / phrase cuts / chord downbeat alignment:
 ``madmom`` DBN downbeat tracking when installed (``pip install Cython`` then
 ``pip install --no-build-isolation -r requirements-madmom.txt`` from ``back-end/``), otherwise librosa
 beats plus onset-strength downbeat phase (librosa alone has no measure position).
-Chord progression and texture are still produced by Chorderator from the melody MIDI; the
+Piano accompaniment is generated from the lead MIDI (LLaMA-MIDI) after this step; the
 cleaner vocal stem reduces bleed from backing instruments into the estimated lead line.
 """
 from __future__ import annotations
@@ -63,7 +63,60 @@ def _ffmpeg_location_dir() -> str | None:
 
 
 def _js_runtime_args() -> list[str]:
-    """yt-dlp 2025+ prefers a JS runtime for YouTube; pass explicit path when found."""
+    """Configure JavaScript engine for yt-dlp signature extraction on bot-protected videos.
+    
+    yt_dlp_ejs is required for extracting signatures on strict YouTube videos.
+    This function ensures yt-dlp can use JavaScript for signature extraction.
+    """
+    try:
+        import yt_dlp_ejs  # noqa: F401
+        # yt_dlp_ejs is available; yt-dlp will auto-detect and use it
+        # We can optionally force it via extractor-args, but auto-detection usually works
+        logging.debug("yt_dlp_ejs is available; JavaScript signature extraction enabled")
+        return []
+    except ImportError:
+        logging.warning(
+            "yt_dlp_ejs not found. JavaScript signature extraction disabled. "
+            "Some YouTube videos may fail bot detection. "
+            "Install with: pip install yt-dlp-ejs"
+        )
+        return []
+
+
+def _cookies_from_browser_args() -> list[str]:
+    """Try to extract cookies from available browsers for YouTube auth. Returns args or empty list.
+    
+    Verifies that a browser's cookie database actually exists AND is accessible before using it.
+    On macOS, checks for browser profiles in standard locations.
+    Skips Safari as its cookies are in a restricted sandboxed container.
+    Falls back to empty list if no accessible browsers found - yt-dlp will use alternative methods.
+    """
+    home = os.path.expanduser("~")
+    
+    # Browser cookie database locations on macOS
+    # Note: Safari excluded - cookies are in restricted ~/Library/Containers/com.apple.Safari/
+    browser_paths = {
+        "chrome": os.path.join(home, "Library/Application Support/Google/Chrome/Default/Cookies"),
+        "firefox": os.path.join(home, ".mozilla/firefox"),  # Firefox has .default-release or other profiles
+        "edge": os.path.join(home, "Library/Application Support/Microsoft Edge/Default/Cookies"),
+        "chromium": os.path.join(home, "Library/Application Support/Chromium/Default/Cookies"),
+    }
+    
+    for browser, path in browser_paths.items():
+        try:
+            # Check both existence and readability
+            if os.path.exists(path) and os.access(path, os.R_OK):
+                logging.debug(f"Found accessible browser cookies database for: {browser}")
+                return ["--cookies-from-browser", browser]
+            else:
+                reason = "not found" if not os.path.exists(path) else "not readable"
+                logging.debug(f"Browser {browser} cookies database {reason} at {path}")
+        except (OSError, PermissionError) as e:
+            logging.debug(f"Cannot access {browser} cookies at {path}: {e}")
+    
+    # If no browsers with accessible cookies found, return empty list
+    # yt-dlp will attempt alternative YouTube access methods (web extraction, etc)
+    logging.debug("No accessible browser cookies found; YouTube download will attempt without cookies")
     return []
 
 
@@ -78,6 +131,7 @@ def _enriched_path_env() -> dict[str, str]:
 
 
 def _run(cmd: list[str], cwd: str | None = None, timeout: int = 600) -> None:
+    """Run command and raise on error with helpful bot detection messages."""
     r = subprocess.run(
         cmd,
         cwd=cwd,
@@ -87,8 +141,31 @@ def _run(cmd: list[str], cwd: str | None = None, timeout: int = 600) -> None:
         env=_enriched_path_env(),
     )
     if r.returncode != 0:
-        err = (r.stderr or r.stdout or "").strip()[:800]
-        raise RuntimeError(err or f"command failed: {' '.join(cmd[:6])} ...")
+        raw = (r.stderr or r.stdout or "").strip()
+        if raw:
+            # Demucs prints progress bars to stderr; keep the tail where the real failure usually appears.
+            tail = "\n".join(raw.splitlines()[-40:])
+            
+            # Check for YouTube bot detection errors with multiple patterns
+            bot_detection_indicators = [
+                "Sign in to confirm you're not a bot",
+                "Please sign in to confirm you're not a bot",
+                "bot detection",
+            ]
+            has_bot_detection = any(indicator.lower() in tail.lower() for indicator in bot_detection_indicators)
+            
+            if has_bot_detection:
+                err = (
+                    f"exit_code={r.returncode}; YouTube bot detection triggered. "
+                    f"This video requires authentication or has regional restrictions. "
+                    f"To resolve: (1) Install Chrome/Firefox with YouTube login, or (2) Try a different video. "
+                    f"Last output:\n{tail}"
+                )
+            else:
+                err = f"exit_code={r.returncode}; last_output:\n{tail}"
+        else:
+            err = f"exit_code={r.returncode}; command failed: {' '.join(cmd[:6])} ..."
+        raise RuntimeError(err[:2400])
 
 
 def _ytdlp_base_cmd() -> list[str]:
@@ -280,19 +357,23 @@ def _estimate_key_from_wav(wav_path: str, max_seconds: float = 120.0) -> tuple[s
     try:
         import librosa
     except ImportError:
+        logging.warning("librosa not installed; cannot detect key from instrumental stem")
         return None, None
 
     try:
         y, sr = librosa.load(wav_path, mono=True, sr=22050, duration=max_seconds)
-    except Exception:
+    except Exception as e:
+        logging.warning(f"Failed to load instrumental stem for key detection: {e}")
         return None, None
     if y.size < sr * 2:
+        logging.warning("Instrumental stem too short for key detection")
         return None, None
 
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
     ch = np.maximum(chroma.mean(axis=1), 0.0)
     s = float(ch.sum())
     if s < 1e-6:
+        logging.warning("Instrumental stem has no energy; cannot detect key")
         return None, None
     ch = ch / s
 
@@ -309,8 +390,12 @@ def _estimate_key_from_wav(wav_path: str, max_seconds: float = 120.0) -> tuple[s
     maj_i, maj_c = best_for(_KK_MAJOR)
     min_i, min_c = best_for(_KK_MINOR)
     if maj_c >= min_c:
-        return _TONIC_SHARP[maj_i], "maj"
-    return _TONIC_SHARP[min_i], "min"
+        tonic, mode = _TONIC_SHARP[maj_i], "maj"
+        logging.info(f"✓ Key detected from instrumental stem: {tonic} {mode} (confidence={maj_c:.3f})")
+        return tonic, mode
+    tonic, mode = _TONIC_SHARP[min_i], "min"
+    logging.info(f"✓ Key detected from instrumental stem: {tonic} {mode} (confidence={min_c:.3f})")
+    return tonic, mode
 
 
 def _find_demucs_vocals_pair(sep_root: str) -> tuple[str, str]:
@@ -357,7 +442,8 @@ def _run_demucs_vocals_stem(wav_path: str, out_root: str, timeout: int = 1800) -
     os.makedirs(out_root, exist_ok=True)
     # Demucs CLI expects an integer segment value in this environment.
     # Keep it safely below the transformer ceiling (~7.8).
-    segment_raw = os.environ.get("ACCOMONTAGE_DEMUCS_SEGMENT", "7").strip() or "7"
+    # Use a conservative default to reduce OOM / abrupt aborts on CPU and Apple Silicon.
+    segment_raw = os.environ.get("ACCOMONTAGE_DEMUCS_SEGMENT", "4").strip() or "4"
     try:
         demucs_segment = str(max(1, min(7, int(float(segment_raw)))))
     except ValueError:
@@ -384,8 +470,9 @@ def youtube_url_to_midi_bytes(url: str, work_dir: str, use_vocal_only: bool = Tr
     """
     Download audio with yt-dlp, isolate vocals with Demucs, run Basic Pitch on vocals.
     Returns (midi_bytes, hints). hints may include suggested_tonic and suggested_mode from
-    the instrumental stem (Krumhansl-style chroma). If Demucs fails, falls back to the full
-    mix for Basic Pitch and returns empty hints.
+    the instrumental stem (Krumhansl-style chroma). When use_vocal_only is True (default),
+    Demucs must succeed; there is no fallback to the full mix—callers should handle errors or
+    pass use_vocal_only=False to transcribe the downloaded mix instead.
     work_dir: existing directory for temp files (session folder).
     """
     if not is_allowed_youtube_url(url):
@@ -403,19 +490,48 @@ def youtube_url_to_midi_bytes(url: str, work_dir: str, use_vocal_only: bool = Tr
 
     ytdlp_cmd = _ytdlp_base_cmd() + ["--no-playlist", "--ffmpeg-location", ff_dir]
     ytdlp_cmd.extend(_js_runtime_args())
+    
+    # Try to use browser cookies if available (Chrome, Firefox, Edge)
+    # Safari excluded due to macOS sandboxing restrictions
+    cookies_args = _cookies_from_browser_args()
+    if cookies_args:
+        ytdlp_cmd.extend(cookies_args)
+    
+    # Comprehensive bot-evasion and fallback strategies for YouTube
+    # This uses multiple extraction methods and player clients to bypass bot detection
     ytdlp_cmd.extend(
         [
-            "-f",
-            "bestaudio/best",
+            # Enable JavaScript runtime for signature extraction (required for strict videos)
+            "--js-runtimes", "node",
+            
+            # Try YouTube web player client with signature extraction
             "--extractor-args",
-            "youtube:player_client=android,web",
+            "youtube:player_client=web;skip_unavailable_videos=true",
+            
+            # Use realistic browser user-agent that mimics popular browsers
+            "--user-agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            
+            # Network and retry configuration for robustness against temporary blocks
+            "--socket-timeout", "30",
+            "--max-sleep-interval", "10",
+            "--min-sleep-interval", "2",
+            "-R", "10",  # Reasonable retry count
+            
+            # Skip problematic fragments gracefully instead of failing hard
+            "--skip-unavailable-fragments",
+            
+            # Add headers to look more like a real browser
+            "--add-header", "Referer:https://www.youtube.com",
+            "--add-header", "Origin:https://www.youtube.com",
+            
+            # Format selection and audio extraction
+            "-f", "bestaudio/best",
             "-x",
-            "--audio-format",
-            "wav",
-            "--audio-quality",
-            "0",
-            "-o",
-            audio_pattern,
+            "--audio-format", "wav",
+            "--audio-quality", "0",
+            "-o", audio_pattern,
+            
             url,
         ]
     )
@@ -434,43 +550,46 @@ def youtube_url_to_midi_bytes(url: str, work_dir: str, use_vocal_only: bool = Tr
 
     logging.info("youtube_melody: download complete, wav=%s", wav_path)
 
-    hints: dict = {"melody_source": "full_mix"}
-    melody_wav = wav_path
     force_skip_demucs = os.environ.get("ACCOMONTAGE_YOUTUBE_NO_DEMUCS", "").lower() in (
         "1",
         "true",
         "yes",
     )
-    skip_demucs = force_skip_demucs or (not bool(use_vocal_only))
-    if not bool(use_vocal_only):
-        hints["melody_source"] = "full_mix_user_choice"
-    if not skip_demucs and importlib.util.find_spec("demucs") is not None:
-        sep_root = os.path.join(work_dir, "demucs_stems")
-        try:
-            logging.info("youtube_melody: starting Demucs (can take many minutes on CPU)…")
-            vocals_path, no_vocals_path = _run_demucs_vocals_stem(wav_path, sep_root)
-            melody_wav = vocals_path
-            hints["melody_source"] = "vocal_stem"
-            logging.info("youtube_melody: Demucs finished, vocals=%s", melody_wav)
-            st, sm = _estimate_key_from_wav(no_vocals_path)
-            if st and sm:
-                hints["suggested_tonic"] = st
-                hints["suggested_mode"] = sm
-            beat_info = _beat_track_no_vocals(no_vocals_path)
-            if beat_info:
-                hints.update(beat_info)
-        except Exception as e:
-            logging.warning(
-                "Vocal / instrumental separation failed; using full mix for melody (%s)", e
-            )
-            melody_wav = wav_path
-            hints["melody_source"] = "full_mix_fallback"
-            hints["melody_source_reason"] = str(e)[:200]
-    elif not skip_demucs:
-        hints["melody_source"] = "full_mix_no_demucs"
-        logging.warning(
-            "demucs is not installed (pip install demucs); using full mix for Basic Pitch"
+    if bool(use_vocal_only) and force_skip_demucs:
+        raise RuntimeError(
+            "Vocal separation is required (use_vocal_only) but ACCOMONTAGE_YOUTUBE_NO_DEMUCS is set. "
+            "Unset ACCOMONTAGE_YOUTUBE_NO_DEMUCS, or pass use_vocal_only=false to transcribe the full mix."
         )
+
+    skip_demucs = force_skip_demucs or (not bool(use_vocal_only))
+    hints: dict = {}
+    melody_wav: str
+
+    if skip_demucs:
+        melody_wav = wav_path
+        hints["melody_source"] = "full_mix_user_choice"
+    elif importlib.util.find_spec("demucs") is None:
+        raise RuntimeError(
+            "Vocal separation requires Demucs. Install with: pip install demucs"
+        )
+    else:
+        sep_root = os.path.join(work_dir, "demucs_stems")
+        logging.info("youtube_melody: starting Demucs (can take many minutes on CPU)…")
+        try:
+            vocals_path, no_vocals_path = _run_demucs_vocals_stem(wav_path, sep_root)
+        except Exception as e:
+            logging.exception("youtube_melody: Demucs vocal separation failed")
+            raise RuntimeError(f"Vocal / instrumental separation failed: {e}") from e
+        melody_wav = vocals_path
+        hints["melody_source"] = "vocal_stem"
+        logging.info("youtube_melody: Demucs finished, vocals=%s", melody_wav)
+        st, sm = _estimate_key_from_wav(no_vocals_path)
+        if st and sm:
+            hints["suggested_tonic"] = st
+            hints["suggested_mode"] = sm
+        beat_info = _beat_track_no_vocals(no_vocals_path)
+        if beat_info:
+            hints.update(beat_info)
 
     # If we did not obtain beat hints from no_vocals, try coarse beat tracking on the current source.
     if hints.get("beat_bpm") is None:
@@ -513,7 +632,7 @@ def youtube_url_to_midi_bytes(url: str, work_dir: str, use_vocal_only: bool = Tr
         
         first_start = notes[0].start
         for n in notes:
-            if n.end - n.start > 0.1:
+            if n.start is not None and n.end is not None and n.end - n.start > 0.1:
                 first_start = n.start
                 break
         
@@ -532,6 +651,15 @@ def youtube_url_to_midi_bytes(url: str, work_dir: str, use_vocal_only: bool = Tr
                 nums_aligned = None
 
             beat_duration = 60.0 / midi_tempo
+
+            # Log detailed tempo info for debugging
+            logging.info(f"📊 Tempo info: detected={midi_tempo:.1f} BPM, beat_duration={beat_duration:.3f}s")
+            if beats and len(beats) > 10:
+                # Calculate actual inter-beat interval from detected beats
+                intervals = [beats[i+1] - beats[i] for i in range(min(10, len(beats)-1))]
+                avg_interval = sum(intervals) / len(intervals)
+                actual_bpm = 60.0 / avg_interval
+                logging.info(f"    Average beat interval (first 10): {avg_interval:.3f}s → {actual_bpm:.1f} BPM")
             
             valid_beats = [i for i, b in enumerate(beats) if b <= first_start + 0.1]
             start_beat_idx = valid_beats[-1] if valid_beats else 0
@@ -569,10 +697,12 @@ def youtube_url_to_midi_bytes(url: str, work_dir: str, use_vocal_only: bool = Tr
                 logging.info("youtube_melody: shifting melody by -%.2fs to remove initial silence", shift_amount)
                 new_notes = []
                 for n in notes:
-                    n.start -= shift_amount
-                    n.end -= shift_amount
-                    if n.end > 0:
-                        n.start = max(0.0, n.start)
+                    if n.start is not None:
+                        n.start -= shift_amount
+                    if n.end is not None:
+                        n.end -= shift_amount
+                    if n.end is not None and n.end > 0:
+                        n.start = max(0.0, n.start) if n.start is not None else 0.0
                         new_notes.append(n)
                 midi.instruments[0].notes = new_notes
             
