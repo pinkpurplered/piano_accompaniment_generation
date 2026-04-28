@@ -112,8 +112,8 @@ def _get_bar_from_beat_grid(
     """
     Map a segment time (in melody MIDI) to a bar number using beat grid.
 
-    Snaps segment to the nearest DOWNBEAT (beat 1) to ensure chords land
-    on bar starts, not on beat 3 or 4.
+    For each beat in the grid, calculates which bar it's in, then finds
+    the bar that contains the segment time.
 
     Args:
         segment_time_sec: Time in melody MIDI (seconds from start).
@@ -124,7 +124,7 @@ def _get_bar_from_beat_grid(
         first_beat_in_bar: What beat the song starts on (1-4).
 
     Returns:
-        Bar number for this segment (snapped to downbeat).
+        Bar number for this segment.
     """
     if not beat_times_sec or not beat_numbers or len(beat_times_sec) < 2:
         # No beat grid; use simple calculation
@@ -143,31 +143,23 @@ def _get_bar_from_beat_grid(
             min_dist = dist
             closest_beat_idx = i
 
-    # Find the NEAREST DOWNBEAT (beat 1) for this segment
-    # Search backward and forward from closest beat
-    nearest_downbeat_idx = None
-    min_downbeat_dist = float('inf')
+    # Use beat grid to determine bar number
+    # Count downbeats (beat_numbers == 1) up to this beat
+    downbeat_count = 0
+    anacrusis_offset = (first_beat_in_bar - 1) / 4.0  # Fraction of bar before first downbeat
 
-    for i, beat_num in enumerate(beat_numbers):
-        if beat_num == 1:  # This is a downbeat
-            dist = abs(beat_times_sec[i] - segment_time_sec)
-            if dist < min_downbeat_dist:
-                min_downbeat_dist = dist
-                nearest_downbeat_idx = i
+    for i in range(closest_beat_idx + 1):
+        if beat_numbers[i] == 1:
+            downbeat_count += 1
 
-    if nearest_downbeat_idx is None:
-        # No downbeat found, use closest beat's bar
-        downbeat_count = sum(1 for i in range(closest_beat_idx + 1) if beat_numbers[i] == 1)
-        bar_num = downbeat_count - 1
-    else:
-        # Count downbeats up to nearest downbeat
-        downbeat_count = sum(1 for i in range(nearest_downbeat_idx + 1) if beat_numbers[i] == 1)
-        bar_num = downbeat_count - 1
+    # Bar number = number of downbeats passed - 1 (0-indexed)
+    bar_num = downbeat_count - 1
 
     # Round to nearest chord change boundary
     bar_num = (bar_num // bars_per_chord) * bars_per_chord
 
-    logging.debug(f"📍 Segment at {segment_time_sec:.2f}s → snapped to bar {bar_num} (downbeat)")
+    logging.debug(f"📍 Segment at {segment_time_sec:.2f}s → beat {closest_beat_idx} "
+                  f"(beat {beat_numbers[closest_beat_idx]}) → bar {bar_num}")
 
     return bar_num
 
