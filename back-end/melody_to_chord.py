@@ -32,6 +32,75 @@ _MINOR_DIATONIC_NAMES = ["i", "ii°", "III", "iv", "v", "VI", "VII"]
 _MINOR_DIATONIC_QUALITIES = ["min", "dim", "maj", "min", "min", "maj", "maj"]
 
 
+def _calculate_phase_offset(
+    notes: list,
+    beat_times_sec: list[float],
+    tempo: float,
+) -> float:
+    """
+    Calculate how far the melody start is offset from the beat grid.
+
+    If melody starts at a time that's between beat grid points,
+    we need to know that offset to align chords properly.
+
+    Args:
+        notes: Smoothed melody notes.
+        beat_times_sec: Beat grid times.
+        tempo: Tempo in BPM.
+
+    Returns:
+        Phase offset in seconds to add to segment times.
+    """
+    if not notes or not beat_times_sec or len(beat_times_sec) < 2:
+        return 0.0
+
+    # Find first melody note time
+    first_note_time = notes[0].start if notes else 0.0
+
+    # Find which beat grid interval contains this time
+    beat_length_sec = 60.0 / tempo
+    beat_times = sorted(beat_times_sec)
+
+    # Find the two beat grid points surrounding the first note
+    beat_before = None
+    beat_after = None
+
+    for i, beat_time in enumerate(beat_times):
+        if beat_time <= first_note_time:
+            beat_before = beat_time
+        if beat_time > first_note_time and beat_after is None:
+            beat_after = beat_time
+            break
+
+    # If first note is before first beat or after last beat, return 0
+    if beat_before is None or beat_after is None:
+        return 0.0
+
+    # Calculate fractional position between beats
+    frac = (first_note_time - beat_before) / (beat_after - beat_before)
+
+    # If closer to beat_before, offset toward it; if closer to beat_after, offset toward it
+    # Small fractional offsets (< 0.1 or > 0.9) suggest alignment to a beat
+    # Middle offsets suggest a phase shift that needs compensation
+
+    if 0.3 < frac < 0.7:  # Middle of beat interval = phase offset
+        # Offset back to nearest beat
+        if frac < 0.5:
+            # Closer to beat_before
+            offset = -(beat_before + beat_length_sec - first_note_time)
+            logging.info(f"📍 Phase offset detected: melody starts {frac*beat_length_sec:.3f}s after beat")
+            logging.info(f"   Offsetting segments by {offset:.3f}s to align with beat grid")
+            return offset
+        else:
+            # Closer to beat_after
+            offset = beat_after - first_note_time
+            logging.info(f"📍 Phase offset detected: melody starts {(1-frac)*beat_length_sec:.3f}s before beat")
+            logging.info(f"   Offsetting segments by {offset:.3f}s to align with beat grid")
+            return offset
+
+    return 0.0
+
+
 def _get_bar_from_beat_grid(
     segment_time_sec: float,
     beat_times_sec: list[float],
@@ -392,10 +461,17 @@ def estimate_chords_from_melody(
         # Apply Viterbi smoothing to prefer chord changes at natural points
         smoothed_chords = _smooth_chord_progression(segment_chords, len(diatonic_roots))
 
+        # Calculate beat grid phase offset (when does first melody note align with beat grid?)
+        phase_offset = _calculate_phase_offset(
+            notes,
+            beat_times_sec or [],
+            tempo
+        )
+
         # Map segment times to beat grid for proper alignment
         segment_times = []
         for seg_idx in range(num_segments):
-            seg_time = seg_idx * bar_length * bars_per_chord
+            seg_time = seg_idx * bar_length * bars_per_chord + phase_offset
             segment_times.append(seg_time)
 
         # Convert to HarmonisedChord format with beat-grid alignment
