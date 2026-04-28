@@ -153,6 +153,9 @@ def _generate_with_rules(
                 mode=mode,
                 bars_per_chord=bars_per_chord,
                 tempo=tempo,
+                beat_times_sec=beat_times_sec,
+                beat_numbers=beat_numbers,
+                pickup_shift=pickup_shift,
             )
             chords = [(c.bar, c.root, c.quality) for c in harmonised]
         

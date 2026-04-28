@@ -32,6 +32,58 @@ _MINOR_DIATONIC_NAMES = ["i", "ii°", "III", "iv", "v", "VI", "VII"]
 _MINOR_DIATONIC_QUALITIES = ["min", "dim", "maj", "min", "min", "maj", "maj"]
 
 
+def _calculate_bar_offset(
+    beat_times_sec: list[float],
+    beat_numbers: list[int],
+    tempo: float,
+    pickup_shift: int = 0,
+) -> int:
+    """
+    Calculate bar offset to align chords with actual song structure.
+
+    If we have beat grid information, use it to figure out which bar the song
+    actually starts on (accounting for anacrusis, silence, etc).
+
+    Args:
+        beat_times_sec: Times of beats in audio (seconds).
+        beat_numbers: Beat position within bar for each beat (1,2,3,4,1,2,...).
+        tempo: Tempo in BPM (for bar length calculation).
+        pickup_shift: Anacrusis offset in sixteenth notes.
+
+    Returns:
+        Bar offset to add to chord bar positions (0 if no beat grid available).
+    """
+    if not beat_times_sec or not beat_numbers:
+        # No beat grid; assume song starts at bar 0
+        return 0
+
+    # If we have a beat grid, the first beat time tells us where the song starts
+    first_beat_time_sec = beat_times_sec[0]
+    first_beat_in_bar = beat_numbers[0] if beat_numbers else 1
+
+    # Convert first beat time to bar position
+    bar_length_sec = (4.0 * 60.0) / tempo
+    beat_length_sec = bar_length_sec / 4.0  # 4 beats per bar
+
+    # Calculate bar and beat position of first actual beat
+    bar_from_time = int(first_beat_time_sec / bar_length_sec)
+
+    # If anacrusis present, adjust bar position
+    if pickup_shift > 0:
+        pickup_beats = pickup_shift / 4.0  # Convert sixteenths to beats
+        pickup_bars = pickup_beats / 4.0  # Convert beats to bars
+        logging.info(f"🎵 Pickup detected: {pickup_shift} sixteenths → {pickup_bars:.2f} bars before downbeat")
+        bar_from_time -= int(pickup_bars)
+
+    # Log alignment info
+    if first_beat_time_sec > 0.1:  # Significant offset from start
+        logging.info(f"🎵 Song starts at {first_beat_time_sec:.2f}s (bar {bar_from_time}, beat {first_beat_in_bar})")
+    else:
+        logging.info(f"🎵 Song starts at bar 0 (no offset detected)")
+
+    return bar_from_time
+
+
 def _smooth_melody_notes(notes):
     """
     Smooth melody notes: merge consecutive same-pitch notes (melisma), drop artifacts.
@@ -126,14 +178,22 @@ def estimate_chords_from_melody(
     mode: str = "maj",
     bars_per_chord: int = 2,
     tempo: float | None = None,
+    beat_times_sec: list[float] | None = None,
+    beat_numbers: list[int] | None = None,
+    pickup_shift: int = 0,
 ) -> list[HarmonisedChord]:
     """
-    Estimate chord progression from melody MIDI.
+    Estimate chord progression from melody MIDI with beat-aware alignment.
 
     Analyzes the melody in 2-bar segments (by default) and chooses the diatonic
     chord whose pitch classes best match the melody notes in that segment.
     Detects 7th chord extensions (maj7, min7, dom7) for emotional richness.
     Uses Viterbi smoothing with ballad-specific transition preferences.
+
+    Aligns chords to the actual song structure using beat grid information:
+    - Finds where the melody actually starts in the beat grid
+    - Adjusts chord bar positions to match the song's actual bars/beats
+    - Handles anacrusis (pickup) alignment
 
     Args:
         midi_path: Path to melody MIDI file.
@@ -141,10 +201,13 @@ def estimate_chords_from_melody(
         mode: 'maj' or 'min'.
         bars_per_chord: Bars per chord change (default 2 for typical pop).
         tempo: Optional tempo in BPM. If not provided, estimates from MIDI.
-               Should use detected tempo from instrumental stem when available.
+        beat_times_sec: Beat grid times from instrumental stem analysis.
+                       Used to align chords to actual song structure.
+        beat_numbers: Beat position within bar for each beat (1, 2, 3, 4, 1, 2, ...).
+        pickup_shift: Anacrusis offset in sixteenth notes (for proper downbeat alignment).
 
     Returns:
-        List of HarmonisedChord.
+        List of HarmonisedChord aligned to actual song structure.
     """
     try:
         from pretty_midi import PrettyMIDI
@@ -268,11 +331,19 @@ def estimate_chords_from_melody(
         
         # Apply Viterbi smoothing to prefer chord changes at natural points
         smoothed_chords = _smooth_chord_progression(segment_chords, len(diatonic_roots))
-        
+
+        # Calculate bar offset for beat alignment
+        bar_offset = _calculate_bar_offset(
+            beat_times_sec or [],
+            beat_numbers or [],
+            tempo,
+            pickup_shift
+        )
+
         # Convert to HarmonisedChord format
         result = []
         for seg_idx, root_idx, quality, conf in smoothed_chords:
-            bar = seg_idx * bars_per_chord
+            bar = seg_idx * bars_per_chord + bar_offset
             root = _TONIC_NAMES[(tonic_pc + diatonic_roots[root_idx]) % 12]
             result.append(HarmonisedChord(
                 bar=bar,
