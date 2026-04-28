@@ -461,38 +461,49 @@ def estimate_chords_from_melody(
         # Apply Viterbi smoothing to prefer chord changes at natural points
         smoothed_chords = _smooth_chord_progression(segment_chords, len(diatonic_roots))
 
-        # Calculate beat grid phase offset (when does first melody note align with beat grid?)
-        phase_offset = _calculate_phase_offset(
-            notes,
-            beat_times_sec or [],
-            tempo
-        )
-
-        # Map segment times to beat grid for proper alignment
-        segment_times = []
-        for seg_idx in range(num_segments):
-            seg_time = seg_idx * bar_length * bars_per_chord + phase_offset
-            segment_times.append(seg_time)
-
-        # Convert to HarmonisedChord format
-        # Use simple tempo-based bar calculation (ignore beat grid for bar assignment)
+        # If we have beat grid, place chords on downbeats (beat 1)
         result = []
-        for seg_idx, root_idx, quality, conf in smoothed_chords:
-            seg_time = segment_times[seg_idx]
-            # Simple bar calculation from tempo
-            bar_num = int(seg_time / bar_length) // bars_per_chord * bars_per_chord
+        if beat_times_sec and beat_numbers and len(beat_times_sec) > 0:
+            logging.info(f"🎵 Placing chords on downbeats from beat grid ({len(beat_times_sec)} beats)")
 
-            root = _TONIC_NAMES[(tonic_pc + diatonic_roots[root_idx]) % 12]
-            result.append(HarmonisedChord(
-                bar=bar_num,
-                beat=0.0,
-                root=root,
-                quality=quality,
-                confidence=min(1.0, conf)
-            ))
+            # Find all downbeats (beat_numbers == 1)
+            downbeat_indices = [i for i, bn in enumerate(beat_numbers) if bn == 1]
+            logging.info(f"📍 Found {len(downbeat_indices)} downbeats")
 
-            if seg_idx < 5:  # Log first 5 chords
-                logging.info(f"  Chord {seg_idx}: {root} {quality} at bar {bar_num} (seg_time={seg_time:.2f}s)")
+            # Assign chords to downbeats (every 1st beat gets a chord)
+            for chord_idx, (seg_idx, root_idx, quality, conf) in enumerate(smoothed_chords):
+                if chord_idx < len(downbeat_indices):
+                    # Use the downbeat time to calculate bar number
+                    downbeat_time = beat_times_sec[downbeat_indices[chord_idx]]
+                    bar_num = int(downbeat_time / bar_length)
+
+                    root = _TONIC_NAMES[(tonic_pc + diatonic_roots[root_idx]) % 12]
+                    result.append(HarmonisedChord(
+                        bar=bar_num,
+                        beat=0.0,
+                        root=root,
+                        quality=quality,
+                        confidence=min(1.0, conf)
+                    ))
+
+                    if chord_idx < 5:
+                        logging.info(f"  Chord {chord_idx}: {root} {quality} at downbeat (time={downbeat_time:.2f}s, bar={bar_num})")
+        else:
+            # No beat grid: fall back to tempo-based calculation
+            logging.info("🎵 No beat grid available, using tempo-based chord placement")
+
+            for seg_idx, root_idx, quality, conf in smoothed_chords:
+                seg_time = seg_idx * bar_length * bars_per_chord
+                bar_num = int(seg_time / bar_length)
+
+                root = _TONIC_NAMES[(tonic_pc + diatonic_roots[root_idx]) % 12]
+                result.append(HarmonisedChord(
+                    bar=bar_num,
+                    beat=0.0,
+                    root=root,
+                    quality=quality,
+                    confidence=min(1.0, conf)
+                ))
         
         logging.info("Harmonised melody: %d chords estimated from %d bars", len(result), num_segments * bars_per_chord)
         return result
