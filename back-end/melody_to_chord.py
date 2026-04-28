@@ -32,6 +32,69 @@ _MINOR_DIATONIC_NAMES = ["i", "ii°", "III", "iv", "v", "VI", "VII"]
 _MINOR_DIATONIC_QUALITIES = ["min", "dim", "maj", "min", "min", "maj", "maj"]
 
 
+def _get_bar_from_beat_grid(
+    segment_time_sec: float,
+    beat_times_sec: list[float],
+    beat_numbers: list[int],
+    tempo: float,
+    bars_per_chord: int = 2,
+    first_beat_in_bar: int = 1,
+) -> int:
+    """
+    Map a segment time (in melody MIDI) to a bar number using beat grid.
+
+    For each beat in the grid, calculates which bar it's in, then finds
+    the bar that contains the segment time.
+
+    Args:
+        segment_time_sec: Time in melody MIDI (seconds from start).
+        beat_times_sec: Times of detected beats (already warped to song time).
+        beat_numbers: Which beat within bar (1,2,3,4,1,2,...).
+        tempo: Tempo in BPM.
+        bars_per_chord: Chords change every N bars.
+        first_beat_in_bar: What beat the song starts on (1-4).
+
+    Returns:
+        Bar number for this segment.
+    """
+    if not beat_times_sec or not beat_numbers or len(beat_times_sec) < 2:
+        # No beat grid; use simple calculation
+        bar_length_sec = (4.0 * 60.0) / tempo
+        return int(segment_time_sec / (bar_length_sec * bars_per_chord)) * bars_per_chord
+
+    # Calculate beat duration
+    beat_length_sec = 60.0 / tempo
+
+    # Find the beat closest to this segment time
+    closest_beat_idx = 0
+    min_dist = abs(beat_times_sec[0] - segment_time_sec)
+    for i, beat_time in enumerate(beat_times_sec):
+        dist = abs(beat_time - segment_time_sec)
+        if dist < min_dist:
+            min_dist = dist
+            closest_beat_idx = i
+
+    # Use beat grid to determine bar number
+    # Count downbeats (beat_numbers == 1) up to this beat
+    downbeat_count = 0
+    anacrusis_offset = (first_beat_in_bar - 1) / 4.0  # Fraction of bar before first downbeat
+
+    for i in range(closest_beat_idx + 1):
+        if beat_numbers[i] == 1:
+            downbeat_count += 1
+
+    # Bar number = number of downbeats passed - 1 (0-indexed)
+    bar_num = downbeat_count - 1
+
+    # Round to nearest chord change boundary
+    bar_num = (bar_num // bars_per_chord) * bars_per_chord
+
+    logging.debug(f"📍 Segment at {segment_time_sec:.2f}s → beat {closest_beat_idx} "
+                  f"(beat {beat_numbers[closest_beat_idx]}) → bar {bar_num}")
+
+    return bar_num
+
+
 def _calculate_bar_offset(
     beat_times_sec: list[float],
     beat_numbers: list[int],
@@ -41,47 +104,41 @@ def _calculate_bar_offset(
     """
     Calculate bar offset to align chords with actual song structure.
 
-    If we have beat grid information, use it to figure out which bar the song
-    actually starts on (accounting for anacrusis, silence, etc).
+    Accounts for anacrusis (pickup) where songs start on beat 2, 3, or 4 instead of beat 1.
+    Note: beat_times_sec is pre-warped by youtube_melody.py to start at time 0,
+    so we use beat_numbers to detect anacrusis.
 
     Args:
-        beat_times_sec: Times of beats in audio (seconds).
+        beat_times_sec: Times of beats in audio (seconds, pre-warped to start at 0).
         beat_numbers: Beat position within bar for each beat (1,2,3,4,1,2,...).
         tempo: Tempo in BPM (for bar length calculation).
-        pickup_shift: Anacrusis offset in sixteenth notes.
+        pickup_shift: Anacrusis offset in sixteenth notes (legacy parameter).
 
     Returns:
-        Bar offset to add to chord bar positions (0 if no beat grid available).
+        Bar offset to add to chord bar positions.
     """
     if not beat_times_sec or not beat_numbers:
-        # No beat grid; assume song starts at bar 0
+        # No beat grid; assume song starts at bar 0, beat 1
         return 0
 
-    # If we have a beat grid, the first beat time tells us where the song starts
-    first_beat_time_sec = beat_times_sec[0]
     first_beat_in_bar = beat_numbers[0] if beat_numbers else 1
 
-    # Convert first beat time to bar position
-    bar_length_sec = (4.0 * 60.0) / tempo
-    beat_length_sec = bar_length_sec / 4.0  # 4 beats per bar
-
-    # Calculate bar and beat position of first actual beat
-    bar_from_time = int(first_beat_time_sec / bar_length_sec)
-
-    # If anacrusis present, adjust bar position
-    if pickup_shift > 0:
-        pickup_beats = pickup_shift / 4.0  # Convert sixteenths to beats
-        pickup_bars = pickup_beats / 4.0  # Convert beats to bars
-        logging.info(f"🎵 Pickup detected: {pickup_shift} sixteenths → {pickup_bars:.2f} bars before downbeat")
-        bar_from_time -= int(pickup_bars)
-
-    # Log alignment info
-    if first_beat_time_sec > 0.1:  # Significant offset from start
-        logging.info(f"🎵 Song starts at {first_beat_time_sec:.2f}s (bar {bar_from_time}, beat {first_beat_in_bar})")
+    # Handle anacrusis: if song starts on beat 2, 3, or 4, it means
+    # there's a pickup at the end of the previous bar
+    if first_beat_in_bar == 1:
+        # Song starts on downbeat - no offset needed
+        bar_offset = 0
+        logging.info(f"🎵 Song starts on downbeat (beat 1) - chords start at bar 0")
     else:
-        logging.info(f"🎵 Song starts at bar 0 (no offset detected)")
+        # Song starts with anacrusis (e.g., beat 3 of the intro bar)
+        # The chords should align to this structure
+        # We DON'T offset bars, but the chords will naturally align
+        # because the beat grid accounts for it
+        bar_offset = 0
+        logging.info(f"🎵 Song starts with anacrusis (beat {first_beat_in_bar}) - "
+                    f"chords will align to pickup structure")
 
-    return bar_from_time
+    return bar_offset
 
 
 def _smooth_melody_notes(notes):
@@ -332,21 +389,29 @@ def estimate_chords_from_melody(
         # Apply Viterbi smoothing to prefer chord changes at natural points
         smoothed_chords = _smooth_chord_progression(segment_chords, len(diatonic_roots))
 
-        # Calculate bar offset for beat alignment
-        bar_offset = _calculate_bar_offset(
-            beat_times_sec or [],
-            beat_numbers or [],
-            tempo,
-            pickup_shift
-        )
+        # Map segment times to beat grid for proper alignment
+        segment_times = []
+        for seg_idx in range(num_segments):
+            seg_time = seg_idx * bar_length * bars_per_chord
+            segment_times.append(seg_time)
 
-        # Convert to HarmonisedChord format
+        # Convert to HarmonisedChord format with beat-grid alignment
         result = []
         for seg_idx, root_idx, quality, conf in smoothed_chords:
-            bar = seg_idx * bars_per_chord + bar_offset
+            # Find which beat this segment aligns with
+            seg_time = segment_times[seg_idx]
+            bar_num = _get_bar_from_beat_grid(
+                seg_time,
+                beat_times_sec or [],
+                beat_numbers or [],
+                tempo,
+                bars_per_chord,
+                first_beat_in_bar=beat_numbers[0] if beat_numbers else 1
+            )
+
             root = _TONIC_NAMES[(tonic_pc + diatonic_roots[root_idx]) % 12]
             result.append(HarmonisedChord(
-                bar=bar,
+                bar=bar_num,
                 beat=0.0,
                 root=root,
                 quality=quality,
