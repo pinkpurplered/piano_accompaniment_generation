@@ -68,57 +68,73 @@ class ChordVoicer:
         self,
         root: str,  # 'C', 'C#', etc.
         quality: str,  # 'maj', 'min', 'maj7', etc.
-        octave: int = 3,  # Middle octave for root
+        octave: int = 4,  # Soprano octave for RH (default higher)
         invert: int = 0,  # 0=root position, 1=first inversion, etc.
         voice_lead: bool = True,  # Use voice leading from last chord
     ) -> ChordVoicing:
         """
-        Voice a chord and return pitches + velocities.
-        
+        Voice a chord across piano keyboard for rich, full sound.
+
+        Creates 5-6 voices spanning bass to soprano for proper piano accompaniment:
+        - Bass (LH, octave 2): root or fundamental
+        - Tenor (LH, octave 3): fills middle-low
+        - Alto (RH, octave 4): chord tones
+        - Soprano (RH, octave 5): highest voices for sparkle
+
         Args:
             root: Root note name.
             quality: Chord quality.
-            octave: Octave of root note (MIDI octave numbering, 0-8).
+            octave: Soprano octave for RH (default 4, range 3-5).
             invert: Inversion (0=root position, 1=first inversion, etc.).
             voice_lead: Use voice leading to minimize motion from last voicing.
-            
+
         Returns:
-            ChordVoicing with pitches and velocities.
+            ChordVoicing with pitches and velocities spread across keyboard.
         """
         # Look up chord intervals
         if quality not in self._CHORD_TEMPLATES:
             quality = "maj"  # Default to major
-        
+
         intervals = self._CHORD_TEMPLATES[quality][:]
         root_pc = self._NOTE_NAME_TO_PC.get(root, 0)
-        
-        # Build chord pitches starting from octave 1 (very low) to octave 5 (high)
-        # Use three-octave range for rich piano sound
         chord_pcs = [(root_pc + int_val) % 12 for int_val in intervals]
+
         pitches = []
         velocities = []
-        
-        # Bass notes (octave 1-2)
-        pitches.append(12 + root_pc)  # Root in octave 1
-        velocities.append(80)  # Bass is stronger
-        
-        if invert == 1 and len(chord_pcs) > 1:
-            # First inversion: third in bass
-            pitches[0] = 12 + chord_pcs[1]
-        
-        # Mid-range chord tones (octave 3-4)
-        for i, pc in enumerate(chord_pcs):
-            midi_pitch = 12 * octave + pc
-            pitches.append(midi_pitch)
-            if i == 0:
-                velocities.append(72)  # Root is stronger
-            else:
-                velocities.append(60)  # Other chord tones softer
-        
+
+        # LH Bass: root in low register (octave 2, MIDI 24-35)
+        bass_pc = chord_pcs[0] if invert == 0 else chord_pcs[1] if len(chord_pcs) > 1 else chord_pcs[0]
+        pitches.append(24 + bass_pc)  # Octave 2
+        velocities.append(75)  # Strong bass
+
+        # LH Tenor: another chord tone to fill middle (octave 3, MIDI 36-47)
+        # Use the fifth if available (creates stability), else third
+        if len(chord_pcs) > 2:  # Has a fifth
+            tenor_pc = chord_pcs[2]  # Fifth
+        elif len(chord_pcs) > 1:
+            tenor_pc = chord_pcs[1]  # Third
+        else:
+            tenor_pc = chord_pcs[0]  # Root
+        pitches.append(36 + tenor_pc)  # Octave 3
+        velocities.append(65)  # Softer tenor
+
+        # RH Alto & Soprano: spread chord tones across upper register for richness
+        # This creates the harmonic color in the RH
+        for octave_offset in [0, 1]:  # Two octaves for RH
+            current_octave = octave + octave_offset
+            for i, pc in enumerate(chord_pcs):
+                midi_pitch = 12 * current_octave + pc
+                if midi_pitch < 108:  # Stay within piano range (C8 = 108)
+                    pitches.append(midi_pitch)
+                    if i == 0:  # Root is slightly stronger
+                        velocities.append(68)
+                    else:
+                        velocities.append(60)
+
         # If voice leading is enabled and we have a previous voicing, optimize
         if voice_lead and self.last_voicing:
             pitches, velocities = self._voice_lead(pitches, velocities, self.last_voicing)
-        
+
         voicing = ChordVoicing(pitches=pitches, velocities=velocities)
         self.last_voicing = voicing
         return voicing
@@ -245,10 +261,10 @@ class PianoArranger:
         """Generate one block chord at the start of each chord change."""
         notes = []
         bar_length_sec = (4.0 * 60.0) / self.config.tempo_bpm
-        
+
         for bar, root, quality in chords:
             time_sec = bar * bar_length_sec
-            voicing = self.voicer.voice_chord(root, quality, voice_lead=True)
+            voicing = self.voicer.voice_chord(root, quality, octave=4, voice_lead=True)
             
             # Whole-note chord (4 bars worth at tempo)
             duration_sec = 4.0 * bar_length_sec
@@ -264,18 +280,18 @@ class PianoArranger:
         return notes
     
     def _generate_arpeggio_texture(self, chords: list[tuple[int, str, str]]) -> list[dict]:
-        """Generate flowing Alberti-style arpeggios."""
+        """Generate flowing Alberti-style arpeggios with richer voice distribution."""
         notes = []
         bar_length_sec = (4.0 * 60.0) / self.config.tempo_bpm
         beat_length_sec = bar_length_sec / (self.config.time_signature[0] or 4)
-        
+
         # Sixteenth-note pattern (4 notes per beat)
         sixteenth_sec = beat_length_sec / 4
-        
+
         for bar, root, quality in chords:
             bar_start_sec = bar * bar_length_sec
-            voicing = self.voicer.voice_chord(root, quality, voice_lead=True)
-            
+            voicing = self.voicer.voice_chord(root, quality, octave=4, voice_lead=True)
+
             if len(voicing.pitches) < 2:
                 # Not enough notes for arpeggio; fall back to block
                 duration_sec = bar_length_sec
@@ -287,39 +303,55 @@ class PianoArranger:
                         "velocity": int(velocity * 0.8),
                     })
                 continue
-            
-            # Alberti pattern: bass, high, middle, high, repeat
-            pattern_pitches = [voicing.pitches[0], voicing.pitches[-1], voicing.pitches[-2 if len(voicing.pitches) > 2 else 1], voicing.pitches[-1]]
-            pattern_velocities = [70, 50, 55, 50]
-            
-            # Play pattern for the entire bar (4 patterns per bar at typical tempo)
+
+            # Improved Alberti pattern using richer voicing:
+            # LH: bass (voicing[0]), tenor (voicing[1])
+            # RH: alto + soprano notes (voicing[2:])
+            # Pattern: LH-bass, RH-high, RH-mid, RH-high (repeat)
+
+            lh_bass = voicing.pitches[0]  # Bass (octave 2)
+            lh_tenor = voicing.pitches[1] if len(voicing.pitches) > 1 else lh_bass  # Tenor (octave 3)
+
+            # RH voices: use upper voicing notes for sparkle
+            rh_pitches = voicing.pitches[2:] if len(voicing.pitches) > 2 else [voicing.pitches[-1]]
+
+            # Create Alberti pattern with LH bass and RH upper notes
+            if len(rh_pitches) >= 2:
+                pattern_pitches = [lh_bass, rh_pitches[-1], rh_pitches[0], rh_pitches[-1]]
+                pattern_velocities = [70, 55, 65, 55]
+            else:
+                # Fallback for chords with few notes
+                pattern_pitches = [lh_bass, lh_tenor, rh_pitches[0] if rh_pitches else lh_tenor, lh_tenor]
+                pattern_velocities = [70, 60, 65, 60]
+
+            # Play pattern for the entire bar
             num_repetitions = int(bar_length_sec / (len(pattern_pitches) * sixteenth_sec)) + 1
-            
+
             for rep in range(num_repetitions):
                 for pat_idx, pitch in enumerate(pattern_pitches):
                     time_sec = bar_start_sec + rep * len(pattern_pitches) * sixteenth_sec + pat_idx * sixteenth_sec
                     if time_sec >= bar_start_sec + bar_length_sec:
                         break
-                    
+
                     notes.append({
                         "time_sec": time_sec,
                         "duration_sec": sixteenth_sec * 0.9,  # Small gap
                         "pitch": pitch,
                         "velocity": pattern_velocities[pat_idx],
                     })
-        
+
         return notes
     
     def _generate_ballad_texture(self, chords: list[tuple[int, str, str]]) -> list[dict]:
-        """Generate light-classical ballad texture: LH on beats 1&3, RH on 2&4."""
+        """Generate light-classical ballad texture: LH bass on 1&3, RH arpeggio on 2&4."""
         notes = []
         bar_length_sec = (4.0 * 60.0) / self.config.tempo_bpm
         beat_length_sec = bar_length_sec / (self.config.time_signature[0] or 4)
-        
+
         for bar, root, quality in chords:
             bar_start_sec = bar * bar_length_sec
-            voicing = self.voicer.voice_chord(root, quality, voice_lead=True)
-            
+            voicing = self.voicer.voice_chord(root, quality, octave=4, voice_lead=True)
+
             if len(voicing.pitches) < 2:
                 # Fall back to block
                 duration_sec = bar_length_sec
@@ -331,28 +363,41 @@ class PianoArranger:
                         "velocity": int(velocity * 0.7),
                     })
                 continue
-            
-            # LH: bass note on beats 1 and 3
+
+            # LH: bass notes on beats 1 and 3 (strong, sustained)
             for beat_num in [1, 3]:
                 beat_start_sec = bar_start_sec + (beat_num - 1) * beat_length_sec
+                # Add both bass and tenor for richer LH
                 notes.append({
                     "time_sec": beat_start_sec,
-                    "duration_sec": beat_length_sec * 1.8,  # Sustain across to next beat
-                    "pitch": voicing.pitches[0],  # Bass note
+                    "duration_sec": beat_length_sec * 1.8,  # Sustain
+                    "pitch": voicing.pitches[0],  # Bass note (octave 2)
                     "velocity": 75,
                 })
-            
-            # RH: chord notes on beats 2 and 4 (rolled)
+                if len(voicing.pitches) > 1:
+                    notes.append({
+                        "time_sec": beat_start_sec + 0.05,  # Slight stagger for rollé effect
+                        "duration_sec": beat_length_sec * 1.5,
+                        "pitch": voicing.pitches[1],  # Tenor note (octave 3)
+                        "velocity": 65,
+                    })
+
+            # RH: chord notes on beats 2 and 4 (rolled, sparkly)
+            # Use only the upper voices (alto, soprano) for RH
+            rh_pitches = voicing.pitches[2:] if len(voicing.pitches) > 2 else [voicing.pitches[-1]]
+            rh_velocities = voicing.velocities[2:] if len(voicing.velocities) > 2 else [voicing.velocities[-1]]
+
             for beat_num in [2, 4]:
                 beat_start_sec = bar_start_sec + (beat_num - 1) * beat_length_sec
-                for chord_idx, (pitch, velocity) in enumerate(zip(voicing.pitches[1:], voicing.velocities[1:])):
+                # Roll out the RH chord over a fraction of the beat
+                for chord_idx, (pitch, velocity) in enumerate(zip(rh_pitches, rh_velocities)):
                     notes.append({
-                        "time_sec": beat_start_sec + chord_idx * (beat_length_sec / len(voicing.pitches)),
-                        "duration_sec": beat_length_sec,
+                        "time_sec": beat_start_sec + chord_idx * (beat_length_sec / max(len(rh_pitches), 2)),
+                        "duration_sec": beat_length_sec * 0.8,
                         "pitch": pitch,
-                        "velocity": int(velocity * 0.7),
+                        "velocity": int(velocity * 0.75),
                     })
-        
+
         return notes
     
     def _write_midi_file(self, output_path: str, notes: list[dict]) -> None:
