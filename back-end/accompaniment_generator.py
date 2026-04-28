@@ -152,6 +152,7 @@ def _generate_with_rules(
                 tonic=tonic,
                 mode=mode,
                 bars_per_chord=bars_per_chord,
+                tempo=tempo,
             )
             chords = [(c.bar, c.root, c.quality) for c in harmonised]
         

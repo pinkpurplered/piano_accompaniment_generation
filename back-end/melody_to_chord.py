@@ -125,6 +125,7 @@ def estimate_chords_from_melody(
     tonic: str = "C",
     mode: str = "maj",
     bars_per_chord: int = 2,
+    tempo: float | None = None,
 ) -> list[HarmonisedChord]:
     """
     Estimate chord progression from melody MIDI.
@@ -139,6 +140,8 @@ def estimate_chords_from_melody(
         tonic: Key root ('C', 'C#', etc.).
         mode: 'maj' or 'min'.
         bars_per_chord: Bars per chord change (default 2 for typical pop).
+        tempo: Optional tempo in BPM. If not provided, estimates from MIDI.
+               Should use detected tempo from instrumental stem when available.
 
     Returns:
         List of HarmonisedChord.
@@ -158,20 +161,39 @@ def estimate_chords_from_melody(
         notes = sorted(pm.instruments[0].notes, key=lambda n: n.start)
         notes = _smooth_melody_notes(notes)
         melody_duration = notes[-1].end
+
+        logging.info("🎵 Melody MIDI: %d notes, %.1f seconds duration", len(notes), melody_duration)
         
-        # Estimate tempo from MIDI
-        try:
-            tempo = float(pm.estimate_tempo())
-            if not (40 < tempo < 240):
+        # Use provided tempo or estimate from MIDI
+        if tempo is None:
+            try:
+                tempo = float(pm.estimate_tempo())
+                if not (40 < tempo < 240):
+                    tempo = 120.0
+            except (TypeError, ValueError):
                 tempo = 120.0
-        except (TypeError, ValueError):
-            tempo = 120.0
-        
+            logging.info("📍 Tempo estimated from MIDI: %.1f BPM", tempo)
+        else:
+            logging.info("📍 Using provided tempo: %.1f BPM", tempo)
+
         # Bar length in seconds
         bar_length = (4.0 * 60.0) / tempo  # 4 beats per bar
-        
+
         # Divide melody into segments
         num_segments = max(1, int(melody_duration / (bar_length * bars_per_chord)))
+
+        # Debug: check if melody duration is suspiciously long
+        max_reasonable_duration = 600  # 10 minutes
+        if melody_duration > max_reasonable_duration:
+            logging.warning("⚠️ Melody MIDI duration %.1f sec is very long (typical song: 3-5 min). "
+                           "May contain transcription artifacts or silence. Trimming to %.1f sec.",
+                           melody_duration, max_reasonable_duration)
+            melody_duration = min(melody_duration, max_reasonable_duration)
+            num_segments = max(1, int(melody_duration / (bar_length * bars_per_chord)))
+
+        logging.info("📊 Chord estimation: tempo=%.1f BPM, bar_length=%.2f sec, "
+                    "melody_duration=%.1f sec → %d segments (%d-bar chunks)",
+                    tempo, bar_length, melody_duration, num_segments, bars_per_chord)
         
         # Choose diatonic chords for this key/mode
         if mode == "maj":
