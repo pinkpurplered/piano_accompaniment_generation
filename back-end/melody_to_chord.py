@@ -474,19 +474,13 @@ def estimate_chords_from_melody(
             seg_time = seg_idx * bar_length * bars_per_chord + phase_offset
             segment_times.append(seg_time)
 
-        # Convert to HarmonisedChord format with beat-grid alignment
+        # Convert to HarmonisedChord format
+        # Use simple tempo-based bar calculation (ignore beat grid for bar assignment)
         result = []
         for seg_idx, root_idx, quality, conf in smoothed_chords:
-            # Find which beat this segment aligns with
             seg_time = segment_times[seg_idx]
-            bar_num = _get_bar_from_beat_grid(
-                seg_time,
-                beat_times_sec or [],
-                beat_numbers or [],
-                tempo,
-                bars_per_chord,
-                first_beat_in_bar=beat_numbers[0] if beat_numbers else 1
-            )
+            # Simple bar calculation from tempo
+            bar_num = int(seg_time / bar_length) // bars_per_chord * bars_per_chord
 
             root = _TONIC_NAMES[(tonic_pc + diatonic_roots[root_idx]) % 12]
             result.append(HarmonisedChord(
