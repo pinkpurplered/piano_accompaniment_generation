@@ -283,6 +283,9 @@ def estimate_chords_from_melody(
         melody_duration = notes[-1].end
 
         logging.info("🎵 Melody MIDI: %d notes, %.1f seconds duration", len(notes), melody_duration)
+        if beat_times_sec:
+            logging.info("🎵 Beat grid available: %d beats, beat_numbers=%s",
+                        len(beat_times_sec), beat_numbers[:4] if beat_numbers else "unknown")
         
         # Use provided tempo or estimate from MIDI
         if tempo is None:
@@ -417,6 +420,9 @@ def estimate_chords_from_melody(
                 quality=quality,
                 confidence=min(1.0, conf)
             ))
+
+            if seg_idx < 5:  # Log first 5 chords
+                logging.info(f"  Chord {seg_idx}: {root} {quality} at bar {bar_num} (seg_time={seg_time:.2f}s)")
         
         logging.info("Harmonised melody: %d chords estimated from %d bars", len(result), num_segments * bars_per_chord)
         return result
