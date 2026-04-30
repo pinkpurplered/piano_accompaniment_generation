@@ -6,6 +6,7 @@ phrase lengths are chosen with a small DP that rewards cuts near estimated downb
 """
 from __future__ import annotations
 
+import io
 import logging
 import math
 import os
@@ -15,7 +16,7 @@ from typing import Any
 import numpy as np
 from pretty_midi import PrettyMIDI
 
-from chorderator.utils.structured import major_map, minor_map, str_to_root
+from key_maps import major_map, minor_map, str_to_root
 
 ALLOWED_PHRASE_BARS = (8, 4)
 _PHRASE_LABELS = ("A", "B", "C", "D")
@@ -103,8 +104,9 @@ def _estimate_key_from_midi_path(midi_path: str) -> tuple[str | None, str | None
         return None, None
     pc = np.zeros(12, dtype=np.float64)
     for n in midi.instruments[0].notes:
-        w = max(float(n.end - n.start), 1e-4)
-        pc[n.pitch % 12] += w
+        if n.start is not None and n.end is not None:
+            w = max(float(n.end - n.start), 1e-4)
+            pc[n.pitch % 12] += w
     s = float(pc.sum())
     if s < 1e-6:
         return None, None
@@ -136,7 +138,7 @@ def _normalize_bar_count(total_bars: int) -> int:
 
 
 def _partition_bars(total_bars: int) -> list[int]:
-    """Split bar count into Chorderator-allowed lengths; prefer larger chunks (fewer phrases)."""
+    """Split bar count into allowed phrase lengths; prefer larger chunks (fewer phrases)."""
     total_bars = _normalize_bar_count(total_bars)
     allowed = tuple(sorted(ALLOWED_PHRASE_BARS, reverse=True))
     parts: list[int] = []
@@ -379,8 +381,10 @@ def apply_pickup_shift_to_midi(midi_bytes: bytes, shift_16ths: int, tempo: float
         # Shift all notes forward in time
         for instrument in midi.instruments:
             for note in instrument.notes:
-                note.start += time_shift
-                note.end += time_shift
+                if note.start is not None:
+                    note.start += time_shift
+                if note.end is not None:
+                    note.end += time_shift
         
         # Write to bytes
         output = io.BytesIO()

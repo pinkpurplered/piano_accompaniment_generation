@@ -21,6 +21,8 @@ def generate_accompaniment(
     pickup_shift: int = 0,
     beat_times_sec: list[float] | None = None,
     beat_numbers: list[int] | None = None,
+    drum_hit_times: list[float] | None = None,
+    instrumental_path: str | None = None,
 ) -> dict[str, Any]:
     """
     Generate piano accompaniment using the configured engine.
@@ -45,20 +47,26 @@ def generate_accompaniment(
         return _generate_with_llama_midi(
             midi_path, out_dir, title=title, tempo=tempo,
             tonic=tonic, mode=mode, pickup_shift=pickup_shift,
-            beat_times_sec=beat_times_sec, beat_numbers=beat_numbers
+            beat_times_sec=beat_times_sec, beat_numbers=beat_numbers,
+            drum_hit_times=drum_hit_times,
+            instrumental_path=instrumental_path,
         )
     elif engine == "rules" or engine == "arranger":
         return _generate_with_rules(
             midi_path, out_dir, title=title, tempo=tempo,
             tonic=tonic, mode=mode, pickup_shift=pickup_shift,
-            beat_times_sec=beat_times_sec, beat_numbers=beat_numbers
+            beat_times_sec=beat_times_sec, beat_numbers=beat_numbers,
+            drum_hit_times=drum_hit_times,
+            instrumental_path=instrumental_path,
         )
     else:
         logging.error("Unknown ACCOMP_ENGINE=%s; defaulting to 'rules'", engine)
         return _generate_with_rules(
             midi_path, out_dir, title=title, tempo=tempo,
             tonic=tonic, mode=mode, pickup_shift=pickup_shift,
-            beat_times_sec=beat_times_sec, beat_numbers=beat_numbers
+            beat_times_sec=beat_times_sec, beat_numbers=beat_numbers,
+            drum_hit_times=drum_hit_times,
+            instrumental_path=instrumental_path,
         )
 
 
@@ -73,6 +81,8 @@ def _generate_with_llama_midi(
     pickup_shift: int,
     beat_times_sec: list[float] | None,
     beat_numbers: list[int] | None,
+    drum_hit_times: list[float] | None = None,
+    instrumental_path: str | None = None,
 ) -> dict[str, Any]:
     """Delegate to the LLaMA-MIDI engine."""
     try:
@@ -114,6 +124,8 @@ def _generate_with_rules(
     pickup_shift: int,
     beat_times_sec: list[float] | None,
     beat_numbers: list[int] | None,
+    drum_hit_times: list[float] | None = None,
+    instrumental_path: str | None = None,
 ) -> dict[str, Any]:
     """Generate using chord recognition + piano arranger."""
     try:
@@ -134,19 +146,37 @@ def _generate_with_rules(
         
         logging.info("🎹 Arranging with rules engine: %s %s @ %.1f BPM",
                      tonic, ("major" if mode == "maj" else "minor"), tempo)
-        
-        # Step 1: Try to recognize chords from accompaniment stem
-        # (For now, we'll skip this and use melody-based harmonisation instead)
-        # Future: parse beat_times_sec to find accompaniment stem path
-        chords = []
-        
-        # Step 2: Fallback to melody-based harmonisation
-        if not chords:
-            logging.info("Harmonising from melody MIDI...")
-            # Tempo-aware segmentation: slower ballads use 1-bar chords for richer harmony
-            bars_per_chord = 1 if tempo < 90 else 2
-            logging.info("🎵 Tempo %.1f BPM → %d-bar chord segments", tempo, bars_per_chord)
 
+        # Step 1: Build the drum-anchored half-bar slot grid (beats 1 & 3).
+        anchors = piano_arranger.build_chord_anchors(
+            tempo_bpm=tempo,
+            drum_hit_times=drum_hit_times or [],
+            beat_grid_times_sec=beat_times_sec,
+        )
+
+        chords: list[tuple[int, str, str]] = []
+        slots_per_chord = 1  # default for chord-recognition flow
+
+        # Step 2: Recognize chords from the instrumental stem, one per slot.
+        if instrumental_path and len(anchors) >= 2:
+            logging.info("🎶 Recognizing chords from instrumental stem: %s", instrumental_path)
+            recognized = chord_recognition.recognize_chords(
+                audio_path=instrumental_path,
+                slot_times=anchors,
+                tonic=tonic,
+                mode=mode,
+                extended=True,
+                smooth=True,
+            )
+            if recognized:
+                chords = [(i, root, quality) for i, (root, quality) in enumerate(recognized)]
+            else:
+                logging.warning("Chord recognition returned nothing; falling back to melody")
+
+        # Step 3: Fallback to melody-based harmonisation if no instrumental result.
+        if not chords:
+            logging.info("Harmonising from melody MIDI (fallback)...")
+            bars_per_chord = 1 if tempo < 90 else 2
             harmonised = melody_to_chord.estimate_chords_from_melody(
                 midi_path,
                 tonic=tonic,
@@ -158,14 +188,15 @@ def _generate_with_rules(
                 pickup_shift=pickup_shift,
             )
             chords = [(c.bar, c.root, c.quality) for c in harmonised]
-        
+            slots_per_chord = 2  # melody flow: one chord per bar = 2 slots
+
         if not chords:
             logging.warning("Chord estimation failed; using default progression")
             chords = [(0, tonic, mode), (2, "G" if tonic == "C" else tonic, mode),
                      (4, "A" if tonic == "C" else tonic, "min"), (6, "F" if tonic == "C" else tonic, mode)]
-        
-        # Step 3: Arrange chords into piano MIDI
-        logging.info("Arranging %d chords...", len(chords))
+            slots_per_chord = 2
+
+        logging.info("Arranging %d chords (%d slots/chord)...", len(chords), slots_per_chord)
 
         # Select texture based on tempo: ballad texture for slow songs (< 90 BPM)
         if tempo < 90:
@@ -181,8 +212,11 @@ def _generate_with_rules(
             time_signature=(4, 4),
             beat_grid_times_sec=beat_times_sec,
             beat_numbers=beat_numbers,
+            drum_hit_times=drum_hit_times or [],
+            precomputed_anchors=anchors,
+            slots_per_chord=slots_per_chord,
             melody_midi_path=midi_path,
-            output_midi_path=None,  # Don't write yet
+            output_midi_path=None,
             texture=texture,
         )
         

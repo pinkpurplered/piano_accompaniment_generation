@@ -1,5 +1,6 @@
 /resource/
 .venv/
+.venv-py39-backup/
 .DS_Store
 __pycache__/
 .idea/
@@ -17,6 +18,9 @@ back-end/static/
 front-end/build/
 static/
 complex_chord_test.py
+back-end/server.log
+back-end/server.pid
+*.pid
 a.txt
 lookup.xlsx
 myplot.png

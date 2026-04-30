@@ -1,0 +1,19 @@
+{
+  "url": "https://www.youtube.com/watch?v=b-6uxr6cGQI&list=RDfalq0Gr3rc0&index=22",
+  "song_name": "b-6uxr6cGQI",
+  "detected_key": null,
+  "detected_mode": "maj",
+  "detected_tempo": 76,
+  "pickup_shift": 12,
+  "chord_count": 0,
+  "block_note_count": 0,
+  "textured_note_count": 0,
+  "melody_note_count": 0,
+  "errors": [],
+  "log_output": "",
+  "midi_files": {},
+  "mp3_files": {
+    "vocal_chord": "37ef267f-8282-4c23-963d-b25700c85246_1777340206102_vocal_chord.mp3",
+    "vocal_textured": "37ef267f-8282-4c23-963d-b25700c85246_1777340206102_vocal_textured.mp3"
+  }
+}

@@ -13,9 +13,10 @@ import pretty_midi
 from flask import Flask, request, send_from_directory, send_file, make_response, jsonify
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
-import chorderator as cdt
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+for _p in (_BACKEND_DIR, _REPO_ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 from Sessions import Sessions
 import melody_analyze
 import youtube_melody
@@ -23,7 +24,6 @@ import audio_mixer
 
 app = Flask(__name__, static_url_path='')
 app.secret_key = 'AccoMontage2-GUI'
-saved_data = cdt.load_data()
 APP_ROUTE = '/api/chorderator_back_end'
 sessions = Sessions()
 logging.basicConfig(level=logging.DEBUG)
@@ -111,40 +111,78 @@ def send_file_from_session(file, name=None):
 
 def extract_accompaniment_only(midi_obj):
     """
-    Extract only accompaniment tracks from MIDI, removing the melody.
-    Assumes the melody is the first instrument (track 0) or the monophonic lead.
+    Extract accompaniment-only MIDI for static export.
+    Legacy Chorderator output was melody + accompaniment (skip track 0).
+    LLaMA-MIDI output is already piano accompaniment only — keep as-is when a single track.
     """
+    if len(midi_obj.instruments) <= 1:
+        return midi_obj
+
     new_midi = pretty_midi.PrettyMIDI()
     new_midi.time_signature_changes = midi_obj.time_signature_changes
     new_midi.key_signature_changes = midi_obj.key_signature_changes
-    
-    # Copy only non-melody instruments (skip first track which is typically the melody)
-    if len(midi_obj.instruments) > 1:
-        for instrument in midi_obj.instruments[1:]:
-            new_midi.instruments.append(instrument)
-    else:
-        # If there's only one instrument, return empty MIDI with proper structure
-        logging.warning("MIDI has only one instrument - likely melody only")
-        
+    for instrument in midi_obj.instruments[1:]:
+        new_midi.instruments.append(instrument)
     return new_midi
 
 
-def begin_generate_thread(core, session_id):
+class _LlamaMidiCoreStub:
+    """State object for /stage_query while LLaMA-MIDI runs in a background thread."""
+
+    __slots__ = ("state",)
+
+    def __init__(self):
+        self.state = 5
+
+    def get_state(self):
+        return self.state
+
+
+def begin_llama_midi_thread(session_id):
+    base = os.path.dirname(os.path.abspath(__file__))
+    session = sessions.sessions.get(session_id)
+    if session is None:
+        return
+    session_dir = os.path.join(base, session_id)
     try:
-        core.generate_save(session_id, log=True)
+        import accompaniment_generator
+
+        # Style-guided title for better ballad-style generation
+        tonic = getattr(session, 'tonic', None) or 'C'
+        mode = getattr(session, 'mode', None) or 'maj'
+        pickup_shift = getattr(session, 'pickup_shift', None) or 0
+        beat_times_sec = getattr(session, 'beat_times_sec', [])
+        beat_numbers = getattr(session, 'beat_numbers', [])
+        drum_hit_times = getattr(session, 'drum_hit_times', [])
+        instrumental_path = getattr(session, 'instrumental_path', None)
+        mode_str = 'major' if mode == 'maj' else 'minor'
+        title = (f"Emotional {mode_str} ballad in {tonic}: "
+                f"Piano accompaniment with COMPLEMENTARY RHYTHM (fills gaps, doesn't clash), "
+                f"follows harmony and emotional flow")
+        
+        # Use the orchestration layer (can switch between engines via ACCOMP_ENGINE env var)
+        engine_config = os.environ.get("ACCOMP_ENGINE", "rules").lower()
+        logging.info("🎹 Starting accompaniment generation (engine=%s)", engine_config)
+        
+        result = accompaniment_generator.generate_accompaniment(
+            os.path.join(session_dir, "full_song.mid"),
+            session_dir,
+            title=title.strip(),
+            tempo=float(getattr(session, "tempo", None) or 120),
+            tonic=tonic,
+            mode=mode,
+            pickup_shift=pickup_shift,
+            beat_times_sec=beat_times_sec,
+            beat_numbers=beat_numbers,
+            drum_hit_times=drum_hit_times,
+            instrumental_path=instrumental_path,
+        )
+        
+        logging.info("✓ Accompaniment generated with %s", result.get("engine", "unknown"))
+        session.core.state = 7
     except Exception as e:
-        logging.exception("generate_save failed session=%s", session_id)
-        if session_id in sessions.sessions:
-            sessions.sessions[session_id].generate_error = (
-                f"{type(e).__name__}: {e}. "
-                "Often caused by a phrase slice length the chord library does not cover "
-                "(e.g. 12 bars in the last segment). Use even 8-bar phrases such as A8B8A8B8, "
-                "or trim the MIDI grid."
-            )[:900]
-        try:
-            core.state = 7
-        except Exception:
-            pass
+        logging.exception("Accompaniment generation failed session=%s", session_id)
+        session.generate_error = (f"{type(e).__name__}: {e}")[:900]
 
 
 @app.route(APP_ROUTE + '/upload_youtube', methods=['POST'])
@@ -187,8 +225,39 @@ def upload_youtube():
         logging.exception('upload_youtube failed')
         return resp(msg=str(e)[:900])
     analysis = melody_analyze.analyze_melody_bytes(session.melody, key_hints=hints)
+    
+    # Store detected tempo
     if analysis.get("detected_tempo") is not None:
         session.tempo = analysis.get("detected_tempo")
+    
+    # Store detected key (tonic and mode) from YouTube song
+    if hints.get("suggested_tonic"):
+        session.tonic = hints.get("suggested_tonic")
+        session.mode = hints.get("suggested_mode", "maj")
+        logging.info(f"✓ Key detected from instrumental stem: {session.tonic} {('major' if session.mode == 'maj' else 'minor')}")
+    elif analysis.get("detected_key_tonic"):
+        session.tonic = analysis.get("detected_key_tonic")
+        session.mode = analysis.get("detected_key_mode", "maj")
+        logging.info(f"✓ Key detected from melody analysis: {session.tonic} {('major' if session.mode == 'maj' else 'minor')}")
+    else:
+        session.tonic = "C"
+        session.mode = "maj"
+        logging.warning("⚠️ Key detection failed on both instrumental and melody - defaulting to C major")
+    
+    # Store pickup shift for chord generation alignment
+    session.pickup_shift = analysis.get("pickup_shift", 0)
+    if session.pickup_shift > 0:
+        logging.info(f"✓ Detected pickup of {session.pickup_shift} sixteenth notes — will align chords to downbeat")
+    
+    # Store beat grid from YouTube audio for rhythm alignment
+    session.beat_times_sec = hints.get("beat_times_sec", [])
+    session.beat_numbers = hints.get("beat_numbers", [])
+    session.drum_hit_times = hints.get("drum_hit_times_sec", [])
+    session.instrumental_path = hints.get("instrumental_path")
+    if session.drum_hit_times:
+        logging.info(f"✓ Stored {len(session.drum_hit_times)} drum hits for chord placement")
+    if session.beat_times_sec:
+        logging.info(f"✓ Stored {len(session.beat_times_sec)} beats from original song for rhythm matching")
     return resp(
         session_id=session_id,
         more=melody_analyze.build_response_more(hints, analysis),
@@ -217,23 +286,26 @@ def generate():
         session.tempo,
         session.segmentation,
     )
-
-    session.core = cdt.get_chorderator()
-    session.core.set_cache(**saved_data)
     
+    # Log key information prominently
+    if session.tonic and session.mode:
+        logging.info("🎹 Generating accompaniment in: %s %s", 
+                    session.tonic, 
+                    "major" if session.mode == "maj" else "minor")
+    else:
+        logging.warning("⚠️ No key detected - will default to C major in generation!")
+
+    session.core = _LlamaMidiCoreStub()
+
     # Use absolute path for session directory
     session_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), session_id)
     os.makedirs(session_dir, exist_ok=True)
-    
-    full_song_path = os.path.join(session_dir, 'full_song.mid')
-    with open(full_song_path, 'wb') as f:
+
+    full_song_path = os.path.join(session_dir, "full_song.mid")
+    with open(full_song_path, "wb") as f:
         f.write(session.melody)
-    session.core.set_melody(full_song_path)
-    session.core.set_output_style(session.chord_style)
-    session.core.set_texture_prefilter(session.texture_style)
-    session.core.set_meta(tonic=session.tonic, meter=session.meter, mode=session.mode, tempo=session.tempo)
-    session.core.set_segmentation(session.segmentation)
-    threading.Thread(target=begin_generate_thread, args=(session.core, session_id)).start()
+
+    threading.Thread(target=begin_llama_midi_thread, args=(session_id,), daemon=True).start()
     return resp(session_id=session_id)
 
 

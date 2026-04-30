@@ -11,9 +11,9 @@ const GENERATED_QUERY_TIMEOUT_MS = 25 * 60 * 1000;
 const statusText = [
     'Preparing audio...',
     'Extracting melody & analyzing...',
-    'Constructing chord progressions...',
-    'Refining progressions...',
-    'Generating textures...',
+    'Generating piano accompaniment (LLaMA-MIDI)...',
+    'Continuing generation...',
+    'Parsing MIDI output...',
     'Synthesizing MIDI...',
     'Finalizing MIDI...',
     'Mixing MP3 audio (this may take a few minutes)...'
@@ -70,15 +70,12 @@ export default function MainInterface() {
     };
 
     const startGeneration = (d) => {
-        const phrases = (d.auto_phrases && d.auto_phrases.length) ? d.auto_phrases : [{ phrase_name: 'A', phrase_length: 8 }];
         const tonic = d.suggested_tonic || 'C';
         const mode = d.suggested_mode || 'maj';
         const tempo = d.detected_tempo ? Math.max(30, Math.min(260, Math.round(Number(d.detected_tempo)))) : 120;
 
         const payload = {
-            tonic, mode, tempo, meter: '4/4', phrases,
-            chord_style: 'pop_standard', rhythm_density: 2, voice_number: 2,
-            enable_texture_style: true, enable_chord_style: true, use_vocal_only: true
+            tonic, mode, tempo
         };
 
         axios.post(`${myServer}/generate`, payload, { withCredentials: true })
@@ -151,7 +148,7 @@ export default function MainInterface() {
     return (
         <div className="app-container">
             <div className="main-content">
-                <h1 className="hero-title">Piano Accompaniment Generator</h1>
+                <h1 className="hero-title">Piano Accompaniment Generation</h1>
                 <p className="hero-subtitle">
                     Transform any YouTube song into a piano accompaniment MIDI.<br/>
                     Powered by AI, completely automatic.

@@ -1,5 +1,5 @@
 {
-  "name": "piano-accompaniment-generator",
+  "name": "piano_accompaniment_generation",
   "version": "0.1.0",
   "private": true,
   "dependencies": {

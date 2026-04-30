@@ -14,6 +14,77 @@ from enum import Enum
 from typing import NamedTuple
 
 
+def build_chord_anchors(
+    tempo_bpm: float,
+    drum_hit_times: list[float] | None,
+    beat_grid_times_sec: list[float] | None = None,
+    song_end_sec: float | None = None,
+) -> list[float]:
+    """Build chord-placement times spaced one half-bar apart (beats 1 and 3).
+
+    Uses drum hits as ground truth: drums hit on beats 2 and 4 (backbeat) in
+    Cantonese ballads, so consecutive hits sit ~half-bar apart. Find the longest
+    regularly-spaced run, then shift back by one beat so anchors land on the
+    listener's beats 1 and 3. Stride evenly from there.
+    """
+    bar_sec = 240.0 / max(tempo_bpm, 1.0)
+    half_bar = bar_sec / 2.0
+    drums = sorted(drum_hit_times or [])
+    bts = sorted(beat_grid_times_sec or [])
+
+    if song_end_sec is None:
+        if drums:
+            song_end_sec = max(drums[-1], bts[-1] if bts else 0.0) + bar_sec
+        elif bts:
+            song_end_sec = bts[-1] + bar_sec
+        else:
+            song_end_sec = 240.0
+
+    if len(drums) < 4:
+        anchor0 = bts[0] if bts else 0.0
+        logging.info("🥁 No drums; uniform anchor grid from %.2fs", anchor0)
+    else:
+        tol = half_bar * 0.30
+        runs, cur = [], [0]
+        for i in range(1, len(drums)):
+            if abs((drums[i] - drums[i - 1]) - half_bar) <= tol:
+                cur.append(i)
+            else:
+                if len(cur) >= 3:
+                    runs.append(cur)
+                cur = [i]
+        if len(cur) >= 3:
+            runs.append(cur)
+        if runs:
+            best = max(runs, key=len)
+            anchor0 = drums[best[0]]
+            logging.info("🥁 Anchored to drum run of %d hits @ %.2fs (half_bar=%.3fs)",
+                         len(best), anchor0, half_bar)
+        else:
+            anchor0 = drums[len(drums) // 2]
+            logging.info("🥁 No regular drum run; anchoring at middle hit %.2fs", anchor0)
+        # Drums sit on backbeats (2 & 4); shift back one beat so anchors are on 1 & 3.
+        anchor0 -= bar_sec / 4.0
+        logging.info("🥁 Shifted anchor by -1 beat → %.2fs (beat 1)", anchor0)
+
+    fwd = [anchor0]
+    t = anchor0
+    while t + half_bar < song_end_sec:
+        t += half_bar
+        fwd.append(t)
+    back = []
+    t = anchor0
+    while t - half_bar > 0:
+        t -= half_bar
+        if t < 0:
+            break
+        back.append(t)
+    anchors = list(reversed(back)) + fwd
+    logging.info("🥁 Built %d chord anchors (%.2fs … %.2fs)",
+                 len(anchors), anchors[0], anchors[-1])
+    return anchors
+
+
 class Texture(Enum):
     """Piano texture style."""
     BLOCK = "block"  # Sustained block chords
@@ -34,6 +105,9 @@ class ArrangementConfig:
     time_signature: tuple[int, int] = (4, 4)  # (beats_per_bar, beat_value)
     beat_grid_times_sec: list[float] = None  # Beat positions in seconds
     beat_numbers: list[int] = None  # Beat position in bar (1, 2, 3, 4, ...)
+    drum_hit_times: list[float] = None  # Times of detected drum hits (preferred chord-placement anchors)
+    precomputed_anchors: list[float] = None  # If set, skip anchor building
+    slots_per_chord: int = 2  # 2 = chord lasts one bar (legacy); 1 = chord lasts one half-bar (new flow)
     default_texture: Texture = Texture.ARPEGGIO
     allow_texture_selection: bool = True  # Auto-select texture based on melody density
 
@@ -175,7 +249,28 @@ class PianoArranger:
     def __init__(self, config: ArrangementConfig | None = None):
         self.config = config or ArrangementConfig()
         self.voicer = ChordVoicer()
-    
+        self._anchors: list[float] = []
+
+    def _build_anchors(self) -> list[float]:
+        if self.config.precomputed_anchors:
+            return list(self.config.precomputed_anchors)
+        return build_chord_anchors(
+            tempo_bpm=self.config.tempo_bpm,
+            drum_hit_times=self.config.drum_hit_times,
+            beat_grid_times_sec=self.config.beat_grid_times_sec,
+        )
+
+    def _slot(self, idx: int) -> tuple[float, float] | tuple[None, None]:
+        """Return (start_sec, duration_sec) for the idx-th half-bar slot, or (None, None)."""
+        if not self._anchors or idx < 0 or idx >= len(self._anchors):
+            return None, None
+        start = self._anchors[idx]
+        if idx + 1 < len(self._anchors):
+            dur = self._anchors[idx + 1] - start
+        else:
+            dur = 240.0 / (2.0 * max(self.config.tempo_bpm, 1.0))
+        return start, max(dur, 0.05)
+
     def arrange(
         self,
         chords: list[tuple[int, str, str]],  # (bar, root, quality)
@@ -197,7 +292,9 @@ class PianoArranger:
         if not chords:
             logging.warning("No chords to arrange")
             return [], []
-        
+
+        self._anchors = self._build_anchors()
+
         # Estimate melody density from melody MIDI (for texture selection)
         melody_density = self._analyze_melody_density(melody_midi_path) if melody_midi_path else 0.5
         
@@ -258,146 +355,100 @@ class PianoArranger:
             return Texture.BALLAD  # Medium density → light accompaniment
     
     def _generate_block_chords(self, chords: list[tuple[int, str, str]]) -> list[dict]:
-        """Generate one block chord at the start of each chord change."""
+        """Re-articulate each chord on beats 1 and 3 (two slots per bar)."""
         notes = []
-        bar_length_sec = (4.0 * 60.0) / self.config.tempo_bpm
-
-        for bar, root, quality in chords:
-            time_sec = bar * bar_length_sec
+        for chord_idx, (_bar, root, quality) in enumerate(chords):
             voicing = self.voicer.voice_chord(root, quality, octave=4, voice_lead=True)
-            
-            # Whole-note chord (4 bars worth at tempo)
-            duration_sec = 4.0 * bar_length_sec
-            
-            for pitch, velocity in zip(voicing.pitches, voicing.velocities):
-                notes.append({
-                    "time_sec": time_sec,
-                    "duration_sec": duration_sec,
-                    "pitch": pitch,
-                    "velocity": velocity,
-                })
-        
+            for slot_offset in range(self.config.slots_per_chord):  # beat 1, beat 3
+                start, dur = self._slot(chord_idx * self.config.slots_per_chord + slot_offset)
+                if start is None:
+                    break
+                for pitch, velocity in zip(voicing.pitches, voicing.velocities):
+                    notes.append({
+                        "time_sec": start,
+                        "duration_sec": dur * 0.95,
+                        "pitch": pitch,
+                        "velocity": velocity,
+                    })
         return notes
     
     def _generate_arpeggio_texture(self, chords: list[tuple[int, str, str]]) -> list[dict]:
-        """Generate flowing Alberti-style arpeggios with richer voice distribution."""
+        """Alberti pattern, one cycle per half-bar slot anchored to beats 1 and 3."""
         notes = []
-        bar_length_sec = (4.0 * 60.0) / self.config.tempo_bpm
-        beat_length_sec = bar_length_sec / (self.config.time_signature[0] or 4)
-
-        # Sixteenth-note pattern (4 notes per beat)
-        sixteenth_sec = beat_length_sec / 4
-
-        for bar, root, quality in chords:
-            bar_start_sec = bar * bar_length_sec
+        for chord_idx, (_bar, root, quality) in enumerate(chords):
             voicing = self.voicer.voice_chord(root, quality, octave=4, voice_lead=True)
-
             if len(voicing.pitches) < 2:
-                # Not enough notes for arpeggio; fall back to block
-                duration_sec = bar_length_sec
-                for pitch, velocity in zip(voicing.pitches, voicing.velocities):
-                    notes.append({
-                        "time_sec": bar_start_sec,
-                        "duration_sec": duration_sec,
-                        "pitch": pitch,
-                        "velocity": int(velocity * 0.8),
-                    })
+                for slot_offset in range(self.config.slots_per_chord):
+                    start, dur = self._slot(chord_idx * self.config.slots_per_chord + slot_offset)
+                    if start is None:
+                        break
+                    for pitch, velocity in zip(voicing.pitches, voicing.velocities):
+                        notes.append({
+                            "time_sec": start,
+                            "duration_sec": dur * 0.95,
+                            "pitch": pitch,
+                            "velocity": int(velocity * 0.8),
+                        })
                 continue
 
-            # Improved Alberti pattern using richer voicing:
-            # LH: bass (voicing[0]), tenor (voicing[1])
-            # RH: alto + soprano notes (voicing[2:])
-            # Pattern: LH-bass, RH-high, RH-mid, RH-high (repeat)
-
-            lh_bass = voicing.pitches[0]  # Bass (octave 2)
-            lh_tenor = voicing.pitches[1] if len(voicing.pitches) > 1 else lh_bass  # Tenor (octave 3)
-
-            # RH voices: use upper voicing notes for sparkle
+            lh_bass = voicing.pitches[0]
+            lh_tenor = voicing.pitches[1] if len(voicing.pitches) > 1 else lh_bass
             rh_pitches = voicing.pitches[2:] if len(voicing.pitches) > 2 else [voicing.pitches[-1]]
-
-            # Create Alberti pattern with LH bass and RH upper notes
             if len(rh_pitches) >= 2:
                 pattern_pitches = [lh_bass, rh_pitches[-1], rh_pitches[0], rh_pitches[-1]]
-                pattern_velocities = [70, 55, 65, 55]
+                pattern_velocities = [78, 60, 68, 60]
             else:
-                # Fallback for chords with few notes
                 pattern_pitches = [lh_bass, lh_tenor, rh_pitches[0] if rh_pitches else lh_tenor, lh_tenor]
-                pattern_velocities = [70, 60, 65, 60]
+                pattern_velocities = [78, 64, 68, 64]
 
-            # Play pattern for the entire bar
-            num_repetitions = int(bar_length_sec / (len(pattern_pitches) * sixteenth_sec)) + 1
-
-            for rep in range(num_repetitions):
+            for slot_offset in range(self.config.slots_per_chord):
+                start, dur = self._slot(chord_idx * self.config.slots_per_chord + slot_offset)
+                if start is None:
+                    break
+                step = dur / len(pattern_pitches)
                 for pat_idx, pitch in enumerate(pattern_pitches):
-                    time_sec = bar_start_sec + rep * len(pattern_pitches) * sixteenth_sec + pat_idx * sixteenth_sec
-                    if time_sec >= bar_start_sec + bar_length_sec:
-                        break
-
                     notes.append({
-                        "time_sec": time_sec,
-                        "duration_sec": sixteenth_sec * 0.9,  # Small gap
+                        "time_sec": start + pat_idx * step,
+                        "duration_sec": step * 0.9,
                         "pitch": pitch,
                         "velocity": pattern_velocities[pat_idx],
                     })
-
         return notes
     
     def _generate_ballad_texture(self, chords: list[tuple[int, str, str]]) -> list[dict]:
-        """Generate light-classical ballad texture: LH bass on 1&3, RH arpeggio on 2&4."""
+        """Ballad: each slot (beat 1, beat 3) hits LH bass + rolled RH chord."""
         notes = []
-        bar_length_sec = (4.0 * 60.0) / self.config.tempo_bpm
-        beat_length_sec = bar_length_sec / (self.config.time_signature[0] or 4)
-
-        for bar, root, quality in chords:
-            bar_start_sec = bar * bar_length_sec
+        for chord_idx, (_bar, root, quality) in enumerate(chords):
             voicing = self.voicer.voice_chord(root, quality, octave=4, voice_lead=True)
-
-            if len(voicing.pitches) < 2:
-                # Fall back to block
-                duration_sec = bar_length_sec
-                for pitch, velocity in zip(voicing.pitches, voicing.velocities):
-                    notes.append({
-                        "time_sec": bar_start_sec,
-                        "duration_sec": duration_sec,
-                        "pitch": pitch,
-                        "velocity": int(velocity * 0.7),
-                    })
-                continue
-
-            # LH: bass notes on beats 1 and 3 (strong, sustained)
-            for beat_num in [1, 3]:
-                beat_start_sec = bar_start_sec + (beat_num - 1) * beat_length_sec
-                # Add both bass and tenor for richer LH
+            rh_pitches = voicing.pitches[2:] if len(voicing.pitches) > 2 else [voicing.pitches[-1]]
+            rh_velocities = voicing.velocities[2:] if len(voicing.velocities) > 2 else [voicing.velocities[-1]]
+            for slot_offset in range(self.config.slots_per_chord):
+                start, dur = self._slot(chord_idx * self.config.slots_per_chord + slot_offset)
+                if start is None:
+                    break
+                # LH bass + tenor on the slot start
                 notes.append({
-                    "time_sec": beat_start_sec,
-                    "duration_sec": beat_length_sec * 1.8,  # Sustain
-                    "pitch": voicing.pitches[0],  # Bass note (octave 2)
-                    "velocity": 75,
+                    "time_sec": start,
+                    "duration_sec": dur * 0.95,
+                    "pitch": voicing.pitches[0],
+                    "velocity": 80,
                 })
                 if len(voicing.pitches) > 1:
                     notes.append({
-                        "time_sec": beat_start_sec + 0.05,  # Slight stagger for rollé effect
-                        "duration_sec": beat_length_sec * 1.5,
-                        "pitch": voicing.pitches[1],  # Tenor note (octave 3)
-                        "velocity": 65,
+                        "time_sec": start + 0.04,
+                        "duration_sec": dur * 0.9,
+                        "pitch": voicing.pitches[1],
+                        "velocity": 68,
                     })
-
-            # RH: chord notes on beats 2 and 4 (rolled, sparkly)
-            # Use only the upper voices (alto, soprano) for RH
-            rh_pitches = voicing.pitches[2:] if len(voicing.pitches) > 2 else [voicing.pitches[-1]]
-            rh_velocities = voicing.velocities[2:] if len(voicing.velocities) > 2 else [voicing.velocities[-1]]
-
-            for beat_num in [2, 4]:
-                beat_start_sec = bar_start_sec + (beat_num - 1) * beat_length_sec
-                # Roll out the RH chord over a fraction of the beat
-                for chord_idx, (pitch, velocity) in enumerate(zip(rh_pitches, rh_velocities)):
+                # RH chord rolled across the slot
+                roll_step = dur / max(len(rh_pitches), 2) * 0.5
+                for k, (pitch, velocity) in enumerate(zip(rh_pitches, rh_velocities)):
                     notes.append({
-                        "time_sec": beat_start_sec + chord_idx * (beat_length_sec / max(len(rh_pitches), 2)),
-                        "duration_sec": beat_length_sec * 0.8,
+                        "time_sec": start + k * roll_step,
+                        "duration_sec": dur * 0.85,
                         "pitch": pitch,
-                        "velocity": int(velocity * 0.75),
+                        "velocity": int(velocity * 0.85),
                     })
-
         return notes
     
     def _write_midi_file(self, output_path: str, notes: list[dict]) -> None:
@@ -434,6 +485,9 @@ def arrange_piano_accompaniment(
     time_signature: tuple[int, int] = (4, 4),
     beat_grid_times_sec: list[float] | None = None,
     beat_numbers: list[int] | None = None,
+    drum_hit_times: list[float] | None = None,
+    precomputed_anchors: list[float] | None = None,
+    slots_per_chord: int = 2,
     melody_midi_path: str | None = None,
     output_midi_path: str | None = None,
     texture: Texture = Texture.ARPEGGIO,
@@ -454,6 +508,9 @@ def arrange_piano_accompaniment(
         time_signature=time_signature,
         beat_grid_times_sec=beat_grid_times_sec or [],
         beat_numbers=beat_numbers or [],
+        drum_hit_times=drum_hit_times or [],
+        precomputed_anchors=precomputed_anchors,
+        slots_per_chord=slots_per_chord,
         default_texture=texture,
         allow_texture_selection=allow_auto_select,
     )

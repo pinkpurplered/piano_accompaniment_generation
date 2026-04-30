@@ -14,7 +14,6 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 _PREFERRED_SOUNDFONTS = [
     os.path.join(_REPO_ROOT, 'back-end', 'assets', 'soundfonts', 'MuseScore_General.sf3'),
     os.path.join(_REPO_ROOT, 'back-end', 'soundfonts', 'MuseScore_General.sf3'),
-    os.path.join(_REPO_ROOT, 'chorderator', 'static', 'default_sound_font.sf2'),
     '/usr/share/sounds/sf2/FluidR3_GM.sf2',
     '/usr/share/soundfonts/FluidR3_GM.sf2',
     '/usr/local/share/soundfonts/FluidR3_GM.sf2',
@@ -59,6 +58,110 @@ def resolve_soundfont(soundfont: str | None = None) -> str | None:
         raise RuntimeError(f'SOUNDFONT_PATH does not exist: {explicit}')
     available = list_available_soundfonts()
     return available[0] if available else None
+
+
+def calculate_audio_db(wav_path: str) -> dict:
+    """
+    Calculate average dB (decibels) of an audio file.
+    
+    Args:
+        wav_path: Path to WAV file
+        
+    Returns:
+        dict with keys:
+            - rms_db: RMS level in dB (relative to full scale, dBFS)
+            - peak_db: Peak level in dB (dBFS)
+            - mean_db: Mean absolute level in dB (dBFS)
+    """
+    if not os.path.isfile(wav_path):
+        raise FileNotFoundError(f"Audio file not found: {wav_path}")
+    
+    try:
+        audio, sr = sf.read(wav_path)
+        
+        # Convert to mono if stereo
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        
+        # Calculate RMS (Root Mean Square)
+        rms = np.sqrt(np.mean(audio ** 2))
+        
+        # Calculate peak amplitude
+        peak = np.max(np.abs(audio))
+        
+        # Calculate mean absolute amplitude
+        mean_abs = np.mean(np.abs(audio))
+        
+        # Convert to dB (dBFS - decibels relative to full scale)
+        # Add epsilon to avoid log(0)
+        epsilon = 1e-10
+        rms_db = 20 * np.log10(rms + epsilon)
+        peak_db = 20 * np.log10(peak + epsilon)
+        mean_db = 20 * np.log10(mean_abs + epsilon)
+        
+        return {
+            "rms_db": float(rms_db),
+            "peak_db": float(peak_db),
+            "mean_db": float(mean_db),
+            "file": wav_path,
+            "duration_sec": len(audio) / sr,
+            "sample_rate": sr
+        }
+    except Exception as e:
+        raise RuntimeError(f"Failed to analyze audio file {wav_path}: {e}")
+
+
+def normalize_audio_to_target_db(audio: np.ndarray, target_rms_db: float = -15.0, allow_peak_above: bool = False) -> np.ndarray:
+    """
+    Normalize audio to a target RMS level in dBFS.
+    
+    Args:
+        audio: Audio samples as numpy array
+        target_rms_db: Target RMS level in dBFS (default: -15.0)
+        allow_peak_above: If True, prioritize RMS target even if peaks exceed -1 dBFS.
+                         If False (default), limit peaks to -1 dBFS for safety.
+        
+    Returns:
+        Normalized audio array
+    """
+    epsilon = 1e-10
+    
+    # Calculate current RMS
+    current_rms = np.sqrt(np.mean(audio ** 2))
+    
+    if current_rms < epsilon:
+        logging.warning("Audio RMS is near zero, skipping normalization")
+        return audio
+    
+    # Calculate current RMS and peak in dB
+    current_rms_db = 20 * np.log10(current_rms + epsilon)
+    current_peak = np.max(np.abs(audio))
+    current_peak_db = 20 * np.log10(current_peak + epsilon)
+    
+    # Calculate gain needed to reach target RMS
+    gain_db = target_rms_db - current_rms_db
+    gain_linear = 10 ** (gain_db / 20)
+    
+    # Predict what the peak would be after normalization
+    predicted_peak = current_peak * gain_linear
+    predicted_peak_db = 20 * np.log10(predicted_peak + epsilon)
+    
+    # Apply gain
+    normalized = audio * gain_linear
+    
+    # Check if we need to limit peaks
+    if not allow_peak_above and predicted_peak > 10 ** (-1.0 / 20):  # -1 dBFS threshold
+        # Apply limiter to maintain -1 dBFS peak
+        limiter_gain = 10 ** (-1.0 / 20) / predicted_peak
+        normalized = normalized * limiter_gain
+        actual_rms = np.sqrt(np.mean(normalized ** 2))
+        actual_rms_db = 20 * np.log10(actual_rms + epsilon)
+        logging.info(f"Normalized with peak limiter: {current_rms_db:.2f} dBFS → {actual_rms_db:.2f} dBFS (peak capped at -1.0 dBFS)")
+    else:
+        actual_rms_db = target_rms_db
+        logging.info(f"Normalized: {current_rms_db:.2f} dBFS → {actual_rms_db:.2f} dBFS (gain: {gain_db:+.2f} dB, peak: {predicted_peak_db:.2f} dBFS)")
+    
+    return normalized
 
 
 def _find_demucs_vocal_stem(stems_root: str) -> str | None:
@@ -406,13 +509,38 @@ def mix_vocal_and_midi(
     if len(midi_audio) < max_len:
         midi_audio = np.pad(midi_audio, (0, max_len - len(midi_audio)))
     
-    # Apply gains and mix
-    mixed = vocal_audio * vocal_gain + midi_audio * midi_gain
+    # Normalize both tracks to target RMS level (-15 dBFS) before mixing
+    # This ensures consistent loudness between vocals and accompaniment
+    logging.info("=" * 60)
+    logging.info("Normalizing audio tracks for mixing...")
+    logging.info("=" * 60)
     
-    # Normalize to prevent clipping
+    logging.info("Vocals:")
+    vocal_audio = normalize_audio_to_target_db(vocal_audio, target_rms_db=-15.0)
+    
+    logging.info("MIDI accompaniment:")
+    midi_audio = normalize_audio_to_target_db(midi_audio, target_rms_db=-15.0)
+    
+    # Apply user-specified gains (now as final balance adjustment, not primary volume control)
+    # Since both tracks are normalized to -15 dBFS, the gains work as relative balance
+    if vocal_gain != 1.0:
+        logging.info(f"Applying vocal gain adjustment: {vocal_gain:.2f}x")
+        vocal_audio = vocal_audio * vocal_gain
+    if midi_gain != 1.0:
+        logging.info(f"Applying MIDI gain adjustment: {midi_gain:.2f}x")
+        midi_audio = midi_audio * midi_gain
+    
+    # Mix the normalized tracks
+    mixed = vocal_audio + midi_audio
+    
+    # Apply soft limiter to prevent clipping in final mix
     max_val = np.max(np.abs(mixed))
     if max_val > 0.99:
-        mixed = mixed * (0.99 / max_val)
+        limiter_ratio = 0.99 / max_val
+        mixed = mixed * limiter_ratio
+        logging.info(f"Applied final mix limiter: {max_val:.3f} → 0.99 (ratio: {limiter_ratio:.3f})")
+    
+    logging.info("=" * 60)
     
     # Write temporary WAV
     temp_mixed_wav = os.path.join(work_dir, "temp_mixed.wav")

@@ -1,0 +1,19 @@
+{
+  "url": "https://www.youtube.com/watch?v=0fcKEN4_QoM&list=RDfalq0Gr3rc0&index=4",
+  "song_name": "0fcKEN4_QoM",
+  "detected_key": null,
+  "detected_mode": "maj",
+  "detected_tempo": 72,
+  "pickup_shift": 12,
+  "chord_count": 0,
+  "block_note_count": 0,
+  "textured_note_count": 0,
+  "melody_note_count": 0,
+  "errors": [],
+  "log_output": "",
+  "midi_files": {},
+  "mp3_files": {
+    "vocal_chord": "71dead72-a8bb-4335-82fc-a5c8a9972e40_1777339912305_vocal_chord.mp3",
+    "vocal_textured": "71dead72-a8bb-4335-82fc-a5c8a9972e40_1777339912305_vocal_textured.mp3"
+  }
+}

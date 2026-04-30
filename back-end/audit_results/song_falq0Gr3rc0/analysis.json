@@ -1,0 +1,19 @@
+{
+  "url": "https://www.youtube.com/watch?v=falq0Gr3rc0&list=RDfalq0Gr3rc0&start_radio=1",
+  "song_name": "falq0Gr3rc0",
+  "detected_key": null,
+  "detected_mode": "maj",
+  "detected_tempo": 76,
+  "pickup_shift": 4,
+  "chord_count": 0,
+  "block_note_count": 0,
+  "textured_note_count": 0,
+  "melody_note_count": 0,
+  "errors": [],
+  "log_output": "",
+  "midi_files": {},
+  "mp3_files": {
+    "vocal_chord": "7684f085-8863-49c4-91ed-d8d68cbbc7dd_1777339746554_vocal_chord.mp3",
+    "vocal_textured": "7684f085-8863-49c4-91ed-d8d68cbbc7dd_1777339746554_vocal_textured.mp3"
+  }
+}

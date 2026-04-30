@@ -475,7 +475,7 @@ def estimate_chords_from_melody(
                 if chord_idx < len(downbeat_indices):
                     # Use the downbeat time to calculate bar number
                     downbeat_time = beat_times_sec[downbeat_indices[chord_idx]]
-                    bar_num = int(downbeat_time / bar_length)
+                    bar_num = chord_idx  # arranger maps bar N → downbeat N via beat grid
 
                     root = _TONIC_NAMES[(tonic_pc + diatonic_roots[root_idx]) % 12]
                     result.append(HarmonisedChord(

@@ -352,6 +352,48 @@ def _beat_track_no_vocals(wav_path: str, max_seconds: float = 240.0) -> dict | N
     return out
 
 
+def _detect_drum_hit_times(wav_path: str, max_seconds: float = 360.0) -> list[float]:
+    """
+    Detect strong percussive (drum) hit times in seconds using librosa HPSS + onset detection.
+    Returns sorted list of onset times. Empty list if librosa unavailable or no hits found.
+    """
+    try:
+        import librosa
+    except ImportError:
+        logging.warning("librosa not installed; cannot detect drum hits")
+        return []
+    try:
+        y, sr = librosa.load(wav_path, mono=True, sr=22050, duration=max_seconds)
+    except Exception as e:
+        logging.warning("drum-hit load failed: %s", e)
+        return []
+    if y.size < sr * 2:
+        return []
+    try:
+        # Isolate percussive component
+        _, y_perc = librosa.effects.hpss(y, margin=3.0)
+        # Onset envelope on percussive content
+        env = librosa.onset.onset_strength(y=y_perc, sr=sr)
+        onset_frames = librosa.onset.onset_detect(
+            onset_envelope=env, sr=sr, units="frames",
+            backtrack=False, delta=0.5, wait=8,  # ~minimum spacing between hits
+        )
+        if len(onset_frames) == 0:
+            return []
+        onset_times = librosa.frames_to_time(onset_frames, sr=sr).tolist()
+        # Filter to keep only strong hits (top 60% by onset envelope value)
+        strengths = [float(env[f]) if f < len(env) else 0.0 for f in onset_frames]
+        if strengths:
+            thr = np.percentile(strengths, 40.0)
+            onset_times = [t for t, s in zip(onset_times, strengths) if s >= thr]
+        logging.info("drum-hit detect: %d hits over %.1fs", len(onset_times),
+                     onset_times[-1] - onset_times[0] if onset_times else 0.0)
+        return onset_times
+    except Exception as e:
+        logging.warning("drum-hit detection failed: %s", e)
+        return []
+
+
 def _estimate_key_from_wav(wav_path: str, max_seconds: float = 120.0) -> tuple[str | None, str | None]:
     """Return (tonic, mode) with mode in {'maj','min'} using chroma + KK profiles, or (None, None)."""
     try:
@@ -590,6 +632,11 @@ def youtube_url_to_midi_bytes(url: str, work_dir: str, use_vocal_only: bool = Tr
         beat_info = _beat_track_no_vocals(no_vocals_path)
         if beat_info:
             hints.update(beat_info)
+        drum_hits = _detect_drum_hit_times(no_vocals_path)
+        if drum_hits:
+            hints["drum_hit_times_sec"] = drum_hits
+            logging.info("✓ Detected %d drum hits for chord placement", len(drum_hits))
+        hints["instrumental_path"] = no_vocals_path
 
     # If we did not obtain beat hints from no_vocals, try coarse beat tracking on the current source.
     if hints.get("beat_bpm") is None:
