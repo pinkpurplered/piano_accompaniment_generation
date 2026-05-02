@@ -176,34 +176,21 @@ class ChordVoicer:
         pitches = []
         velocities = []
 
-        # LH Bass: root in low register (octave 2, MIDI 24-35)
-        bass_pc = chord_pcs[0] if invert == 0 else chord_pcs[1] if len(chord_pcs) > 1 else chord_pcs[0]
-        pitches.append(24 + bass_pc)  # Octave 2
-        velocities.append(75)  # Strong bass
+        # LH: single bass note, root in octave 3 (C3 = MIDI 48, range C2–C4)
+        bass_pc = chord_pcs[0]
+        bass_pitch = 48 + bass_pc  # octave 3 by default
+        if bass_pitch > 60:        # don't go above C4
+            bass_pitch -= 12
+        pitches.append(bass_pitch)
+        velocities.append(72)
 
-        # LH Tenor: another chord tone to fill middle (octave 3, MIDI 36-47)
-        # Use the fifth if available (creates stability), else third
-        if len(chord_pcs) > 2:  # Has a fifth
-            tenor_pc = chord_pcs[2]  # Fifth
-        elif len(chord_pcs) > 1:
-            tenor_pc = chord_pcs[1]  # Third
-        else:
-            tenor_pc = chord_pcs[0]  # Root
-        pitches.append(36 + tenor_pc)  # Octave 3
-        velocities.append(65)  # Softer tenor
-
-        # RH Alto & Soprano: spread chord tones across upper register for richness
-        # This creates the harmonic color in the RH
-        for octave_offset in [0, 1]:  # Two octaves for RH
-            current_octave = octave + octave_offset
-            for i, pc in enumerate(chord_pcs):
-                midi_pitch = 12 * current_octave + pc
-                if midi_pitch < 108:  # Stay within piano range (C8 = 108)
-                    pitches.append(midi_pitch)
-                    if i == 0:  # Root is slightly stronger
-                        velocities.append(68)
-                    else:
-                        velocities.append(60)
+        # RH: chord tones clustered around C4 (MIDI 60)
+        for i, pc in enumerate(chord_pcs):
+            rh_pitch = 60 + pc  # octave 4
+            if rh_pitch > 72:   # keep below C5 for a tight voicing
+                rh_pitch -= 12
+            pitches.append(rh_pitch)
+            velocities.append(65 if i == 0 else 58)
 
         # If voice leading is enabled and we have a previous voicing, optimize
         if voice_lead and self.last_voicing:

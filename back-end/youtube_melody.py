@@ -83,41 +83,6 @@ def _js_runtime_args() -> list[str]:
         return []
 
 
-def _cookies_from_browser_args() -> list[str]:
-    """Try to extract cookies from available browsers for YouTube auth. Returns args or empty list.
-    
-    Verifies that a browser's cookie database actually exists AND is accessible before using it.
-    On macOS, checks for browser profiles in standard locations.
-    Skips Safari as its cookies are in a restricted sandboxed container.
-    Falls back to empty list if no accessible browsers found - yt-dlp will use alternative methods.
-    """
-    home = os.path.expanduser("~")
-    
-    # Browser cookie database locations on macOS
-    # Note: Safari excluded - cookies are in restricted ~/Library/Containers/com.apple.Safari/
-    browser_paths = {
-        "chrome": os.path.join(home, "Library/Application Support/Google/Chrome/Default/Cookies"),
-        "firefox": os.path.join(home, ".mozilla/firefox"),  # Firefox has .default-release or other profiles
-        "edge": os.path.join(home, "Library/Application Support/Microsoft Edge/Default/Cookies"),
-        "chromium": os.path.join(home, "Library/Application Support/Chromium/Default/Cookies"),
-    }
-    
-    for browser, path in browser_paths.items():
-        try:
-            # Check both existence and readability
-            if os.path.exists(path) and os.access(path, os.R_OK):
-                logging.debug(f"Found accessible browser cookies database for: {browser}")
-                return ["--cookies-from-browser", browser]
-            else:
-                reason = "not found" if not os.path.exists(path) else "not readable"
-                logging.debug(f"Browser {browser} cookies database {reason} at {path}")
-        except (OSError, PermissionError) as e:
-            logging.debug(f"Cannot access {browser} cookies at {path}: {e}")
-    
-    # If no browsers with accessible cookies found, return empty list
-    # yt-dlp will attempt alternative YouTube access methods (web extraction, etc)
-    logging.debug("No accessible browser cookies found; YouTube download will attempt without cookies")
-    return []
 
 
 def _enriched_path_env() -> dict[str, str]:
@@ -532,12 +497,6 @@ def youtube_url_to_midi_bytes(url: str, work_dir: str, use_vocal_only: bool = Tr
 
     ytdlp_cmd = _ytdlp_base_cmd() + ["--no-playlist", "--ffmpeg-location", ff_dir]
     ytdlp_cmd.extend(_js_runtime_args())
-    
-    # Try to use browser cookies if available (Chrome, Firefox, Edge)
-    # Safari excluded due to macOS sandboxing restrictions
-    cookies_args = _cookies_from_browser_args()
-    if cookies_args:
-        ytdlp_cmd.extend(cookies_args)
     
     # Comprehensive bot-evasion and fallback strategies for YouTube
     # This uses multiple extraction methods and player clients to bypass bot detection
